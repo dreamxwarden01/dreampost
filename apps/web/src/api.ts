@@ -66,8 +66,8 @@ async function request(path: string, token: string, signal: AbortSignal, accept 
   try {
     response = await fetch(path, {
       signal,
-      headers: { Authorization: `Bearer ${token}`, Accept: accept },
-      credentials: 'omit',
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), Accept: accept },
+      credentials: token ? 'omit' : 'same-origin',
       cache: 'no-store',
       redirect: 'error',
     });
@@ -77,7 +77,7 @@ async function request(path: string, token: string, signal: AbortSignal, accept 
   }
   if (response.ok) return response;
   if (response.status === 401 || response.status === 403) {
-    throw new ApiError('The development view token was rejected. Enter a valid token to reconnect.', response.status);
+    throw new ApiError(token ? 'The development view token was rejected. Enter a valid token to reconnect.' : 'Your session expired or access changed. Sign in again.', response.status);
   }
   if (response.status === 404) {
     throw new ApiError('This mailbox or message is no longer available. Refresh the inbox.', 404);
@@ -134,4 +134,40 @@ export async function getRawMessage(mailboxId: string, messageId: string, token:
 
 export function errorMessage(error: unknown): string {
   return error instanceof ApiError ? error.message : 'The request could not be completed. Please try again.';
+}
+
+export async function getMailboxes(signal: AbortSignal): Promise<Mailbox[]> {
+  const data = await json(await request('/api/mailboxes', '', signal));
+  return list(data.mailboxes).map(value => {
+    const item = record(value);
+    return { id: string(item.id), address: string(item.address), name: string(item.name) };
+  });
+}
+
+export async function sessionRequest<T>(path: string, options: { method?: string; body?: unknown; csrfToken?: string; signal?: AbortSignal } = {}): Promise<T> {
+  const response = await fetch(path, {
+    method: options.method ?? 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: options.signal,
+    headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(options.csrfToken ? { 'X-CSRF-Token': options.csrfToken } : {}) },
+    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+  });
+  if (!response.ok) {
+    const failure: unknown = await response.json().catch(() => null);
+    const code = failure && typeof failure === 'object' && 'error' in failure && typeof failure.error === 'string' ? failure.error : '';
+    const messages: Record<string, string> = {
+      address_taken: 'That address is already allocated. Choose another address.',
+      address_unavailable: 'That address is unavailable. Choose another address.',
+      forbidden: 'You do not have permission for this action.',
+      invalid_address: 'Enter a valid address in a managed domain.',
+      legacy_route_cutover_required: 'This address still uses the legacy gateway. Complete its gateway migration before changing it.',
+      reserved_address: 'This address is reserved for administrator assignment.',
+      unmanaged_address_domain: 'Choose an address in a managed mail domain.',
+      permission_denied: 'You do not have permission for this action.',
+      request_not_pending: 'This request was already processed. Refresh the list.',
+    };
+    if (response.status === 401) throw new ApiError('Your session expired. Sign in again.', 401);
+    throw new ApiError(messages[code] ?? 'The action could not be completed. Refresh and try again.', response.status);
+  }
+  if (response.status === 204) return undefined as T;
+  return await response.json() as T;
 }

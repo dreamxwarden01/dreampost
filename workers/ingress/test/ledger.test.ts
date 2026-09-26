@@ -1,28 +1,13 @@
-import { readFileSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
-import { D1Ledger } from '../src/storage.js';
 import type { DeliveryRecord } from '../src/model.js';
+import { sqliteLedger } from './helpers/sqlite-ledger.js';
 
-const databases: DatabaseSync[] = [];
+const databases: ReturnType<typeof sqliteLedger>[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
-
 function ledger() {
-  const sql = new DatabaseSync(':memory:');
-  databases.push(sql);
-  sql.exec(readFileSync(new URL('../migrations/0001_deliveries.sql', import.meta.url), 'utf8'));
-  sql.exec(readFileSync(new URL('../migrations/0002_done_retention.sql', import.meta.url), 'utf8'));
-  // Run the real adapter's SQL against SQLite, keeping only D1's wire result shape as a shim.
-  const db = { prepare(query: string) {
-    return { bind(...values: (string | number | null)[]) {
-      return {
-        async first() { return sql.prepare(query).get(...values) ?? null; },
-        async all() { return { results: sql.prepare(query).all(...values) }; },
-        async run() { return { meta: { changes: Number(sql.prepare(query).run(...values).changes) } }; },
-      };
-    } };
-  } } as unknown as D1Database;
-  return new D1Ledger(db);
+  const context = sqliteLedger();
+  databases.push(context);
+  return context.ledger;
 }
 
 function record(id = '00000000-0000-4000-8000-000000000001'): DeliveryRecord {

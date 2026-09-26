@@ -7,7 +7,7 @@ if (!['http:', 'https:'].includes(target.protocol) || target.username || target.
   throw new Error('DEV_API_TARGET must be an HTTP or HTTPS URL without credentials.');
 }
 
-const proxy = { '/api': { target: target.origin, changeOrigin: false } };
+const proxy = Object.fromEntries(['/api', '/auth', '/backchannel', '/.well-known'].map(path => [path, { target: target.origin, changeOrigin: false }]));
 
 export default defineConfig({
   plugins: [react()],

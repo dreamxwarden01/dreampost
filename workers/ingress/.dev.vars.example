@@ -1,2 +1,6 @@
 # Copy to .dev.vars for local development only. Use a real secret for deployment.
 INGEST_SECRET=development-only-change-this-32-byte-secret
+
+# Optional local policy control; ROUTING_MODE remains static unless explicitly changed.
+# Use a separate real Worker secret for POLICY_KEYS_JSON in deployment.
+# POLICY_KEYS_JSON={"control-development":"development-only-policy-secret-change-before-use"}

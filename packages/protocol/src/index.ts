@@ -2,8 +2,7 @@ export const MAX_INBOUND_BYTES = 25 * 1024 * 1024;
 export const CLOUDFLARE_OUTBOUND_MAX_BYTES = 5 * 1024 * 1024;
 export const INGEST_PATH = '/internal/v1/deliveries';
 
-export interface DeliveryMetadata {
-  version: 1;
+interface DeliveryMetadataBase {
   deliveryId: string;
   mailboxId: string;
   envelopeFrom: string;
@@ -11,6 +10,15 @@ export interface DeliveryMetadata {
   receivedAt: string;
   rawSize: number;
 }
+
+export interface DeliveryMetadataV1 extends DeliveryMetadataBase { version: 1; }
+export interface DeliveryMetadataV2 extends DeliveryMetadataBase {
+  version: 2;
+  allocationId: string;
+  routeRevision: number;
+  policyDigest: string;
+}
+export type DeliveryMetadata = DeliveryMetadataV1 | DeliveryMetadataV2;
 
 export interface DeliveryAck {
   version: 1;
@@ -98,8 +106,9 @@ export function normalizeRecipientAddress(value: string): string {
 export function validateMetadata(value: unknown): DeliveryMetadata {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('invalid_metadata', 'Delivery metadata must be an object.');
   const v = value as Record<string, unknown>;
-  if (Object.keys(v).length !== metadataKeys.length || Object.keys(v).some(key => !metadataKeys.includes(key))) fail('invalid_metadata', 'Unexpected delivery metadata fields.');
-  if (v.version !== 1 || typeof v.deliveryId !== 'string' || !uuid.test(v.deliveryId) || typeof v.mailboxId !== 'string' || !uuid.test(v.mailboxId)) fail('invalid_metadata', 'Unsupported version or invalid delivery identity.');
+  const expectedKeys = v.version === 2 ? [...metadataKeys, 'allocationId', 'routeRevision', 'policyDigest'] : metadataKeys;
+  if (Object.keys(v).length !== expectedKeys.length || Object.keys(v).some(key => !expectedKeys.includes(key))) fail('invalid_metadata', 'Unexpected delivery metadata fields.');
+  if ((v.version !== 1 && v.version !== 2) || typeof v.deliveryId !== 'string' || !uuid.test(v.deliveryId) || typeof v.mailboxId !== 'string' || !uuid.test(v.mailboxId)) fail('invalid_metadata', 'Unsupported version or invalid delivery identity.');
   if (!address(v.envelopeFrom, true) || !address(v.envelopeTo, false)) fail('invalid_metadata', 'Invalid envelope address.');
   if (typeof v.receivedAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(v.receivedAt) || !Number.isFinite(Date.parse(v.receivedAt))) fail('invalid_metadata', 'Invalid receipt timestamp.');
   const canonicalReceipt = v.receivedAt.includes('.')
@@ -107,11 +116,18 @@ export function validateMetadata(value: unknown): DeliveryMetadata {
     : v.receivedAt.replace(/Z$/, '.000Z');
   if (new Date(v.receivedAt).toISOString() !== canonicalReceipt) fail('invalid_metadata', 'Receipt timestamp is not a valid calendar date.');
   if (typeof v.rawSize !== 'number' || !Number.isSafeInteger(v.rawSize) || v.rawSize < 1 || v.rawSize > MAX_INBOUND_BYTES) fail('invalid_metadata', 'Message size exceeds the supported range.');
-  return {
-    version: 1, deliveryId: v.deliveryId, mailboxId: v.mailboxId,
+  const base = { deliveryId: v.deliveryId, mailboxId: v.mailboxId,
     envelopeFrom: v.envelopeFrom, envelopeTo: v.envelopeTo,
-    receivedAt: v.receivedAt, rawSize: v.rawSize,
-  };
+    receivedAt: v.receivedAt, rawSize: v.rawSize };
+  if (v.version === 2) {
+    if (typeof v.allocationId !== 'string' || !uuid.test(v.allocationId)
+      || typeof v.routeRevision !== 'number' || !Number.isSafeInteger(v.routeRevision) || v.routeRevision < 1
+      || typeof v.policyDigest !== 'string' || !digestPattern.test(v.policyDigest)) {
+      fail('invalid_metadata', 'Invalid admission policy identity.');
+    }
+    return { version: 2, ...base, allocationId: v.allocationId, routeRevision: v.routeRevision, policyDigest: v.policyDigest };
+  }
+  return { version: 1, ...base };
 }
 
 function encodeBase64Url(bytes: Uint8Array): string {
@@ -224,3 +240,5 @@ export function matchesAck(value: unknown, expected: { deliveryId: string; sha25
   const ack = value as Record<string, unknown>;
   return ack.version === 1 && ack.status === 'stored' && ack.deliveryId === expected.deliveryId && ack.sha256 === expected.sha256;
 }
+
+export * from './policy.js';

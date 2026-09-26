@@ -5,20 +5,31 @@ export interface GatewayConfig {
   backendUrl: string;
   key: { id: string; secret: string };
   doneRetentionDays: number;
+  routingMode: 'static' | 'dynamic';
+  policyKeys: Record<string, string>;
+  allowedPolicyDomains: string[];
 }
 
 export interface GatewayVariables {
-  RECIPIENT_ROUTES_JSON: string;
+  RECIPIENT_ROUTES_JSON?: string;
   BACKEND_INGEST_URL: string;
   INGEST_KEY_ID: string;
   INGEST_SECRET: string;
   ALLOW_INSECURE_LOCAL_BACKEND?: string;
   DONE_RETENTION_DAYS?: string;
+  ROUTING_MODE?: string;
+  POLICY_KEYS_JSON?: string;
+  POLICY_ALLOWED_DOMAINS_JSON?: string;
 }
 
 export function readConfig(env: GatewayVariables): GatewayConfig {
+  const routingMode = env.ROUTING_MODE ?? 'static';
+  if (routingMode !== 'static' && routingMode !== 'dynamic') throw new Error('Invalid routing mode');
   let value: unknown;
-  try { value = JSON.parse(env.RECIPIENT_ROUTES_JSON); } catch { throw new Error('Invalid recipient configuration'); }
+  try {
+    const encodedRoutes = env.RECIPIENT_ROUTES_JSON ?? (routingMode === 'dynamic' ? '{}' : '');
+    value = JSON.parse(encodedRoutes);
+  } catch { throw new Error('Invalid recipient configuration'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid recipient configuration');
   const routes: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [address, mailbox] of Object.entries(value)) {
@@ -46,5 +57,32 @@ export function readConfig(env: GatewayVariables): GatewayConfig {
   if (!/^\d+$/.test(retention) || !Number.isSafeInteger(doneRetentionDays) || doneRetentionDays < 1 || doneRetentionDays > 3650) {
     throw new Error('DONE_RETENTION_DAYS must be an integer between 1 and 3650');
   }
-  return { routes, backendUrl: url.href, key: { id: env.INGEST_KEY_ID, secret: env.INGEST_SECRET }, doneRetentionDays };
+  const policyKeys: Record<string, string> = Object.create(null) as Record<string, string>;
+  let allowedPolicyDomains: string[] = [];
+  if (routingMode === 'dynamic') {
+    let keys: unknown;
+    let domains: unknown;
+    try {
+      keys = JSON.parse(env.POLICY_KEYS_JSON ?? 'null');
+      domains = JSON.parse(env.POLICY_ALLOWED_DOMAINS_JSON ?? 'null');
+    } catch { throw new Error('Invalid policy control configuration'); }
+    if (!keys || typeof keys !== 'object' || Array.isArray(keys) || !Object.keys(keys).length) {
+      throw new Error('Policy control requires a separate key ring');
+    }
+    for (const [id, secret] of Object.entries(keys)) {
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id) || typeof secret !== 'string'
+        || new TextEncoder().encode(secret).length < 32 || secret === env.INGEST_SECRET) {
+        throw new Error('Invalid or reused policy signing key');
+      }
+      policyKeys[id] = secret;
+    }
+    if (!Array.isArray(domains) || !domains.length || domains.some(domain => typeof domain !== 'string'
+      || domain.length > 253 || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(domain)
+      || domain.includes('..') || domain.split('.').some((label: string) => label.length > 63 || label.startsWith('-') || label.endsWith('-')))) {
+      throw new Error('Policy control requires explicit allowed domains');
+    }
+    allowedPolicyDomains = [...new Set((domains as string[]).map(domain => domain.toLowerCase()))];
+  }
+  return { routes, backendUrl: url.href, key: { id: env.INGEST_KEY_ID, secret: env.INGEST_SECRET },
+    doneRetentionDays, routingMode, policyKeys, allowedPolicyDomains };
 }

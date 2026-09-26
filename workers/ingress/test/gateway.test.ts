@@ -13,6 +13,9 @@ const clone = <T>(value: T): T => structuredClone(value);
 
 class MemoryLedger implements Ledger {
   records = new Map<string, DeliveryRecord>();
+  async applyPolicy(): Promise<'applied' | 'conflict'> { throw new Error('Use the SQLite policy fixture'); }
+  async getPolicy() { return null; }
+  async admitDynamic() { return false; }
   failUpdates = 0;
   async insert(record: DeliveryRecord) {
     if (this.records.has(record.deliveryId)) throw new Error('Duplicate');
@@ -79,7 +82,8 @@ function fixture() {
     messages.push(body);
   }) };
   const config: GatewayConfig = { routes: { 'inbox@example.test': mailboxId },
-    backendUrl: 'https://api.example.test/internal/v1/deliveries', key: { id: 'development', secret }, doneRetentionDays: 7 };
+    backendUrl: 'https://api.example.test/internal/v1/deliveries', key: { id: 'development', secret }, doneRetentionDays: 7,
+    routingMode: 'static', policyKeys: {}, allowedPolicyDomains: [] };
   const calls: { headers: Headers; raw: Uint8Array }[] = [];
   const local = new Map<string, string>();
   const backend = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {

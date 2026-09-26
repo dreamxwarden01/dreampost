@@ -19,7 +19,12 @@
     "jobs": "node --env-file=.local/dev.env --import tsx apps/api/src/commands/jobs.ts",
     "setup:local": "node scripts/setup-local.mjs",
     "replay:local": "node --env-file=.local/dev.env scripts/replay-local.mjs",
-    "test:integration": "pnpm run build:protocol && node --env-file=.local/dev.env node_modules/vitest/vitest.mjs run"
+    "test:integration": "pnpm run build:protocol && node --env-file=.local/dev.env node_modules/vitest/vitest.mjs run",
+    "setup:sso": "node scripts/setup-sso.mjs",
+    "sso:registration": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/commands/sso.ts registration",
+    "sso:sync": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/commands/sso.ts sync",
+    "dev:api:sso": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/server.ts",
+    "jobs:policies": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/commands/policies.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

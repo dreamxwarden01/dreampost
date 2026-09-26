@@ -141,14 +141,27 @@ describe.skipIf(!databaseUrl)('inbound API with real PostgreSQL', () => {
     expect((await push(raw, meta)).statusCode).toBe(200);
   });
 
-  it('normalizes explicit seed addresses and rejects routes that differ only in case', async () => {
+  it('keeps a valid v2 delivery retryable when admission history is missing after restoration', async () => {
+    const meta: DeliveryMetadata = { ...metadata(raw), version: 2, allocationId: randomUUID(),
+      routeRevision: 9, policyDigest: 'a'.repeat(64) };
+    const result = await push(raw, meta);
+    expect(result.statusCode).toBe(503);
+    expect(result.json()).toEqual({ error: 'admission_history_unavailable' });
+    expect((await pool.query('SELECT count(*) AS count FROM deliveries')).rows[0].count).toBe('0');
+  });
+
+  it('keeps routes unique independently of retained mailbox display addresses', async () => {
     const mixedId = randomUUID();
     await seedMailbox(pool, { id: mixedId, address: 'New.Reader@EXAMPLE.TEST', name: 'Mixed case' });
     expect((await pool.query('SELECT address FROM mailboxes WHERE id = $1', [mixedId])).rows[0].address).toBe('new.reader@example.test');
     await expect(pool.query('INSERT INTO recipient_routes (address, mailbox_id) VALUES ($1, $2)',
       ['READER@EXAMPLE.TEST', otherMailboxId])).rejects.toMatchObject({ code: '23505' });
-    await expect(pool.query('INSERT INTO mailboxes (id, address, name) VALUES ($1, $2, $3)',
-      [randomUUID(), 'READER@EXAMPLE.TEST', 'Ambiguous mailbox'])).rejects.toMatchObject({ code: '23505' });
+    const retainedMailbox = randomUUID();
+    await pool.query('INSERT INTO mailboxes (id, address, name) VALUES ($1, $2, $3)',
+      [retainedMailbox, 'READER@EXAMPLE.TEST', 'Independent retained mailbox']);
+    expect((await pool.query('SELECT mailbox_id FROM recipient_routes WHERE lower(address) = $1', ['reader@example.test'])).rows)
+      .toEqual([{ mailbox_id: mailboxId }]);
+    expect((await pool.query('SELECT count(*) AS count FROM deliveries WHERE mailbox_id = $1', [retainedMailbox])).rows[0].count).toBe('0');
   });
 
   it('holds no mailbox/route lock during blob persistence and rechecks revoked routing afterward', async () => {

@@ -1,4 +1,4 @@
-import type { DeliveryMetadata } from '@dreampost/protocol';
+import type { DeliveryMetadata, RoutePolicy } from '@dreampost/protocol';
 
 export type DeliveryState = 'receiving' | 'stored' | 'blocked' | 'delivered_pending_delete' | 'done';
 
@@ -20,7 +20,12 @@ export interface DeliveryRecord {
 export type DeliveryPatch = Partial<Pick<DeliveryRecord,
   'sha256' | 'state' | 'updatedAt' | 'nextAttemptAt' | 'leaseToken' | 'leaseUntil' | 'lastError'>>;
 
+export interface StoredPolicy { policy: RoutePolicy; sha256: string; }
+
 export interface Ledger {
+  applyPolicy(policy: RoutePolicy, digest: string, now: number): Promise<'applied' | 'conflict'>;
+  getPolicy(address: string): Promise<StoredPolicy | null>;
+  admitDynamic(record: DeliveryRecord, address: string): Promise<boolean>;
   insert(record: DeliveryRecord): Promise<void>;
   get(id: string): Promise<DeliveryRecord | null>;
   claim(id: string, state: DeliveryState, token: string, now: number, leaseMs: number): Promise<DeliveryRecord | null>;

@@ -57,9 +57,11 @@ export async function readBounded(stream: ReadableStream<Uint8Array>, max: numbe
 }
 
 function sameMetadata(a: DeliveryMetadata, b: DeliveryMetadata): boolean {
-  return a.version === b.version && a.deliveryId === b.deliveryId && a.mailboxId === b.mailboxId
-    && a.envelopeFrom === b.envelopeFrom && a.envelopeTo === b.envelopeTo
-    && a.receivedAt === b.receivedAt && a.rawSize === b.rawSize;
+  if (a.version !== b.version || a.deliveryId !== b.deliveryId || a.mailboxId !== b.mailboxId
+    || a.envelopeFrom !== b.envelopeFrom || a.envelopeTo !== b.envelopeTo
+    || a.receivedAt !== b.receivedAt || a.rawSize !== b.rawSize) return false;
+  return a.version === 1 || (b.version === 2 && a.allocationId === b.allocationId
+    && a.routeRevision === b.routeRevision && a.policyDigest === b.policyDigest);
 }
 
 export class Gateway {
@@ -73,22 +75,45 @@ export class Gateway {
   }
 
   async receive(message: InboundMessage): Promise<void> {
-    // Lookup is case-insensitive; signed metadata retains the original SMTP envelope.
-    // No implicit catch-all, plus-address matching, or mailbox creation.
+    // Signed metadata always retains the original SMTP envelope spelling.
     const recipient = normalizeRecipientAddress(message.to);
-    const mailboxId = Object.hasOwn(this.deps.config.routes, recipient) ? this.deps.config.routes[recipient] : undefined;
-    if (!mailboxId) { message.setReject('Recipient is not configured'); return; }
     if (!Number.isSafeInteger(message.rawSize) || message.rawSize < 1 || message.rawSize > MAX_INBOUND_BYTES) {
       message.setReject('Message size is not supported'); return;
     }
     const now = this.now();
-    const metadata = validateMetadata({ version: 1, deliveryId: this.uuid(), mailboxId,
-      envelopeFrom: message.from, envelopeTo: message.to, receivedAt: new Date(now).toISOString(), rawSize: message.rawSize });
+    const deliveryId = this.uuid();
     const token = this.uuid();
-    const record: DeliveryRecord = { deliveryId: metadata.deliveryId, metadata, sha256: null, state: 'receiving',
-      createdAt: now, updatedAt: now, nextAttemptAt: now + LEASE_MS, lastEnqueuedAt: null,
-      leaseToken: token, leaseUntil: now + LEASE_MS, attempts: 0, lastError: null };
-    await this.deps.ledger.insert(record);
+    const makeRecord = (metadata: DeliveryMetadata): DeliveryRecord => ({
+      deliveryId, metadata, sha256: null, state: 'receiving', createdAt: now, updatedAt: now,
+      nextAttemptAt: now + LEASE_MS, lastEnqueuedAt: null, leaseToken: token, leaseUntil: now + LEASE_MS,
+      attempts: 0, lastError: null,
+    });
+    const base = { deliveryId, envelopeFrom: message.from, envelopeTo: message.to,
+      receivedAt: new Date(now).toISOString(), rawSize: message.rawSize };
+    let record: DeliveryRecord | undefined;
+    if (this.deps.config.routingMode === 'dynamic') {
+      const domain = recipient.slice(recipient.lastIndexOf('@') + 1);
+      if (!this.deps.config.allowedPolicyDomains.includes(domain)) {
+        message.setReject('Recipient is not configured'); return;
+      }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const current = await this.deps.ledger.getPolicy(recipient);
+        if (!current || !current.policy.receiveEnabled) {
+          message.setReject('Recipient is not configured'); return;
+        }
+        const candidate = makeRecord(validateMetadata({ ...base, version: 2, mailboxId: current.policy.mailboxId,
+          allocationId: current.policy.allocationId, routeRevision: current.policy.revision, policyDigest: current.sha256 }));
+        if (await this.deps.ledger.admitDynamic(candidate, recipient)) { record = candidate; break; }
+      }
+      // A race or database failure is not a deterministic SMTP policy rejection.
+      if (!record) throw new Error('Recipient policy changed during admission');
+    } else {
+      const mailboxId = Object.hasOwn(this.deps.config.routes, recipient) ? this.deps.config.routes[recipient] : undefined;
+      if (!mailboxId) { message.setReject('Recipient is not configured'); return; }
+      record = makeRecord(validateMetadata({ ...base, version: 1, mailboxId }));
+      await this.deps.ledger.insert(record);
+    }
+    const metadata = record.metadata;
     const bytes = await readBounded(message.raw, MAX_INBOUND_BYTES);
     if (bytes.byteLength !== metadata.rawSize) throw new Error('Raw size mismatch');
     const digest = await sha256Hex(bytes);
@@ -258,4 +283,4 @@ export class Gateway {
 }
 
 class IntegrityError extends Error {}
-class BodyLimitError extends Error {}
+export class BodyLimitError extends Error {}

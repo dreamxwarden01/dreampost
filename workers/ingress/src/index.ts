@@ -1,3 +1,5 @@
+import { POLICY_PATH } from '@dreampost/protocol';
+import { handlePolicyRequest } from './policies.js';
 import { readConfig } from './config.js';
 import type { GatewayVariables } from './config.js';
 import { Gateway } from './core.js';
@@ -22,6 +24,17 @@ function gateway(env: Env): Gateway {
 }
 
 export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (new URL(request.url).pathname !== POLICY_PATH || (env.ROUTING_MODE ?? 'static') !== 'dynamic') {
+      return Response.json({ error: 'not_found' }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
+    }
+    try { return await handlePolicyRequest(request, readConfig(env), new D1Ledger(env.DB)); }
+    catch {
+      log('policy_control_failed');
+      return Response.json({ error: 'policy_temporarily_unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+  },
+
   async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
     try { await gateway(env).receive(message as InboundMessage); }
     catch {

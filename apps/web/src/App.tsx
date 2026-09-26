@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { errorMessage, getMailbox, getMessage, getMessages, getRawMessage, type Mailbox, type MessageDetail, type MessageSummary } from './api';
+import { SsoWorkspace } from './SsoWorkspace';
 
-interface Session {
+export interface Session {
   token: string;
   mailbox: Mailbox;
 }
@@ -167,7 +168,7 @@ function MessageReader({ session, messageId, revision, onBack }: { session: Sess
   </section>;
 }
 
-function Inbox({ session }: { session: Session }) {
+export function Inbox({ session }: { session: Session }) {
   const [messages, setMessages] = useState<MessageSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -223,11 +224,29 @@ function Inbox({ session }: { session: Session }) {
   </main>;
 }
 
-export function App() {
+function DevelopmentApp() {
   const [session, setSession] = useState<Session | null>(null);
 
   return <div className="app-shell">
     <header className="app-header"><div className="brand"><span className="brand-symbol"><Icon name="mail" /></span><span>DreamPost</span></div><span className="development-label">Development inbox</span><div className="header-actions">{session ? <><span className="connection-label"><span className="status-dot connected" />Mailbox connected</span><button className="button subtle" onClick={() => setSession(null)} aria-label="Disconnect"><Icon name="disconnect" /><span>Disconnect</span></button></> : <span className="connection-label">Read-only local view</span>}</div></header>
     {session ? <Inbox session={session} /> : <ConnectionForm onConnect={setSession} />}
   </div>;
+}
+
+export function App() {
+  const [mode, setMode] = useState<'loading' | 'development' | 'sso' | 'error'>('loading');
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('/api/config', { credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error('Unavailable');
+        const config: unknown = await response.json();
+        if (!config || typeof config !== 'object' || !('authentication' in config) || !['development', 'sso'].includes(String(config.authentication))) throw new Error('Invalid configuration');
+        if (!controller.signal.aborted) setMode(config.authentication as 'development' | 'sso');
+      }).catch(() => { if (!controller.signal.aborted) setMode('error'); });
+    return () => controller.abort();
+  }, []);
+  if (mode === 'development') return <DevelopmentApp />;
+  if (mode === 'sso') return <SsoWorkspace />;
+  return <main className="connection-page"><section className="connection-card"><h1>DreamPost</h1><p>{mode === 'error' ? 'Cannot reach the mail service. Check the connection and reload.' : 'Connecting to your mail service…'}</p>{mode === 'error' && <button className="button primary" onClick={() => window.location.reload()}>Reload</button>}</section></main>;
 }
