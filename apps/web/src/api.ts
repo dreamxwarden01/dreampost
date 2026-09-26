@@ -1,0 +1,137 @@
+export interface Mailbox {
+  id: string;
+  address: string;
+  name: string;
+}
+
+export interface MessageSummary {
+  id: string;
+  subject: string;
+  from: string;
+  to: string;
+  receivedAt: string;
+  preview: string;
+  status: string;
+  sizeBytes: number;
+}
+
+export interface MessageDetail extends Omit<MessageSummary, 'preview'> {
+  text: string;
+}
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+function invalidResponse(): never {
+  throw new ApiError('The server returned an invalid response. Try refreshing.');
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalidResponse();
+  return value as Record<string, unknown>;
+}
+
+function string(value: unknown): string {
+  if (typeof value !== 'string') return invalidResponse();
+  return value;
+}
+
+function list(value: unknown): unknown[] {
+  if (!Array.isArray(value)) return invalidResponse();
+  return value;
+}
+
+function messageFields(value: unknown): Omit<MessageSummary, 'preview'> {
+  const item = record(value);
+  if (typeof item.sizeBytes !== 'number' || !Number.isFinite(item.sizeBytes) || item.sizeBytes < 0) {
+    return invalidResponse();
+  }
+  return {
+    id: string(item.id),
+    subject: string(item.subject),
+    from: string(item.from),
+    to: string(item.to),
+    receivedAt: string(item.receivedAt),
+    status: string(item.status),
+    sizeBytes: item.sizeBytes,
+  };
+}
+
+async function request(path: string, token: string, signal: AbortSignal, accept = 'application/json'): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      signal,
+      headers: { Authorization: `Bearer ${token}`, Accept: accept },
+      credentials: 'omit',
+      cache: 'no-store',
+      redirect: 'error',
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new ApiError('Cannot reach the local mail service. Check the API and development proxy, then try again.');
+  }
+  if (response.ok) return response;
+  if (response.status === 401 || response.status === 403) {
+    throw new ApiError('The development view token was rejected. Enter a valid token to reconnect.', response.status);
+  }
+  if (response.status === 404) {
+    throw new ApiError('This mailbox or message is no longer available. Refresh the inbox.', 404);
+  }
+  if (response.status === 429) {
+    throw new ApiError('The service is receiving too many requests. Wait a moment, then try again.', 429);
+  }
+  throw new ApiError('The local mail service could not complete the request. Try again shortly.', response.status);
+}
+
+async function json(response: Response): Promise<Record<string, unknown>> {
+  try {
+    return record(await response.json());
+  } catch {
+    return invalidResponse();
+  }
+}
+
+export async function getMailbox(token: string, signal: AbortSignal): Promise<Mailbox> {
+  const data = await json(await request('/api/mailboxes', token, signal));
+  const mailboxes = list(data.mailboxes);
+  if (mailboxes.length !== 1) {
+    throw new ApiError('The development API must expose exactly one configured mailbox. Check the API configuration.');
+  }
+  const item = record(mailboxes[0]);
+  return { id: string(item.id), address: string(item.address), name: string(item.name) };
+}
+
+function mailboxPath(mailboxId: string): string {
+  return `/api/mailboxes/${encodeURIComponent(mailboxId)}/messages`;
+}
+
+export async function getMessages(mailboxId: string, token: string, signal: AbortSignal): Promise<MessageSummary[]> {
+  const data = await json(await request(mailboxPath(mailboxId), token, signal));
+  return list(data.messages).map((value) => ({ ...messageFields(value), preview: string(record(value).preview) }));
+}
+
+export async function getMessage(mailboxId: string, messageId: string, token: string, signal: AbortSignal): Promise<MessageDetail> {
+  const path = `${mailboxPath(mailboxId)}/${encodeURIComponent(messageId)}`;
+  const data = await json(await request(path, token, signal));
+  const message = { ...messageFields(data.message), text: string(record(data.message).text) };
+  if (message.id !== messageId) return invalidResponse();
+  return message;
+}
+
+export async function getRawMessage(mailboxId: string, messageId: string, token: string, signal: AbortSignal): Promise<Blob> {
+  const path = `${mailboxPath(mailboxId)}/${encodeURIComponent(messageId)}/raw`;
+  const response = await request(path, token, signal, 'message/rfc822');
+  if (response.headers.get('content-type')?.split(';')[0]?.trim() !== 'message/rfc822') {
+    return invalidResponse();
+  }
+  return response.blob();
+}
+
+export function errorMessage(error: unknown): string {
+  return error instanceof ApiError ? error.message : 'The request could not be completed. Please try again.';
+}

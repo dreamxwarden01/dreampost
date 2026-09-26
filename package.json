@@ -1,0 +1,30 @@
+{
+  "name": "dreampost",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build:protocol": "pnpm --filter @dreampost/protocol build",
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm run build:protocol && pnpm -r --if-present typecheck",
+    "test": "pnpm run build:protocol && vitest run",
+    "dev:api": "node --env-file=.local/dev.env --import tsx apps/api/src/server.ts",
+    "dev:web": "pnpm --filter @dreampost/web dev",
+    "dev:gateway": "pnpm --filter @dreampost/ingress dev",
+    "db:migrate": "node --env-file=.local/dev.env --import tsx apps/api/src/commands/migrate.ts",
+    "db:seed": "node --env-file=.local/dev.env --import tsx apps/api/src/commands/seed.ts",
+    "jobs": "node --env-file=.local/dev.env --import tsx apps/api/src/commands/jobs.ts",
+    "setup:local": "node scripts/setup-local.mjs",
+    "replay:local": "node --env-file=.local/dev.env scripts/replay-local.mjs",
+    "test:integration": "pnpm run build:protocol && node --env-file=.local/dev.env node_modules/vitest/vitest.mjs run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.0"
+  }
+}

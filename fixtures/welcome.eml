@@ -1,0 +1,14 @@
+From: DreamPost Lab <lab@example.test>
+To: inbox@example.test
+Subject: Your DreamPost test inbox is ready
+Date: Fri, 25 Sep 2026 12:00:00 +0000
+Message-ID: <sample-message@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This is a local development message.
+
+DreamPost stores the complete original message before acknowledging delivery.
+The parsing job runs afterward, and this inbox reads the resulting local data.
+
+This fixture does not send an email over SMTP.

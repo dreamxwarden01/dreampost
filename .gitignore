@@ -14,3 +14,12 @@ coverage/
 # Editor and operating-system files
 .DS_Store
 Thumbs.db
+
+# Cloudflare local secrets
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Per-deployment Worker configuration
+wrangler.*.local.json
+wrangler.*.local.jsonc

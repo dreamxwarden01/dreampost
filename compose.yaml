@@ -1,0 +1,32 @@
+name: dreampost
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: dreampost
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run the local environment setup first}
+      POSTGRES_DB: dreampost
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-54329}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dreampost -d dreampost"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-16379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+volumes:
+  postgres-data:
+  redis-data:

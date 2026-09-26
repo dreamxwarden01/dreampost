@@ -1,0 +1,25 @@
+{
+  "name": "@dreampost/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "migrate": "tsx src/commands/migrate.ts",
+    "seed": "tsx src/commands/seed.ts",
+    "jobs": "tsx src/commands/jobs.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dreampost/protocol": "workspace:*",
+    "fastify": "5.12.5",
+    "pg": "8.23.0",
+    "postal-mime": "3.0.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.6"
+  }
+}
