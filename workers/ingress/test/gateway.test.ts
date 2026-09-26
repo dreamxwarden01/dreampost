@@ -13,8 +13,10 @@ const clone = <T>(value: T): T => structuredClone(value);
 
 class MemoryLedger implements Ledger {
   records = new Map<string, DeliveryRecord>();
+  async inspectRecipient(): Promise<never> { throw new Error('Use the SQLite inspection fixture'); }
   async applyPolicy(): Promise<'applied' | 'conflict'> { throw new Error('Use the SQLite policy fixture'); }
   async getPolicy() { return null; }
+  async getAppliedOperation() { return null; }
   async admitDynamic() { return false; }
   failUpdates = 0;
   async insert(record: DeliveryRecord) {

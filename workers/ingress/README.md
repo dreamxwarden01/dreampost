@@ -1,6 +1,6 @@
 # Inbound gateway
 
-This package implements the inbound gateway. It exports email, queue, scheduled, and HTTP handlers. Static mode returns 404 for HTTP requests. Dynamic mode exposes only the authenticated policy control endpoint described below. It does not configure Email Routing or catch-all rules.
+This package implements the inbound gateway. It exports email, queue, scheduled, and HTTP handlers. Static mode returns 404 for HTTP requests unless an operator endpoint or static preloading is explicitly configured. Dynamic mode exposes the authenticated policy endpoint and any explicitly configured operator endpoint described below. It does not configure Email Routing or catch-all rules.
 
 `RECIPIENT_ROUTES_JSON` maps explicitly configured SMTP recipients case-insensitively to configured mailbox UUIDs. The checked-in configuration uses only `example.test`. Use an ignored deployment configuration for real resources and a recipient you control and are authorized to test. Set `INGEST_SECRET` through Worker secrets. The backend URL must be HTTPS and end in `/internal/v1/deliveries`. Local development can explicitly enable HTTP for loopback hosts with `ALLOW_INSECURE_LOCAL_BACKEND=true`.
 
@@ -31,7 +31,7 @@ Unit tests exercise recovery and concurrency with fake services. A Wrangler dry 
 
 ## Opt-in dynamic recipient policies
 
-`ROUTING_MODE=static` remains the default and uses `RECIPIENT_ROUTES_JSON`. New static receipts use delivery metadata v1. Set `ROUTING_MODE=dynamic` only after applying migration `0003_recipient_policies.sql` and upgrading the local backend to accept v2 admission evidence. Dynamic receipt never falls back to the static map, including when an address is unknown or disabled.
+`ROUTING_MODE=static` remains the default and uses `RECIPIENT_ROUTES_JSON`. New static receipts use delivery metadata v1. Set `ROUTING_MODE=dynamic` only after applying migrations through `0004_recipient_inspection.sql`, preparing the intended policies, and upgrading the local backend to accept v2 admission evidence. Dynamic receipt never falls back to the static map, including when an address is unknown or disabled.
 
 Dynamic mode requires:
 
@@ -50,3 +50,33 @@ Admitted v2 metadata preserves the original envelope spelling and permanently bi
 Policy history is retained independently of completed-delivery tombstones. Do not delete that history without an explicit control-outbox reconciliation and retention design. No lifecycle API, account provisioning, or sending-permission implementation is provided by this Worker; those remain backend responsibilities.
 
 A policy ACK confirms the D1 admission policy, not DNS configuration or upstream Email Routing delivery. This package never creates catch-all rules, adds Cloudflare routing addresses, or changes domain MX records. A local SQLite test or dry run is not evidence that the control endpoint is deployed or that a new alias receives Internet mail.
+
+## Safe static preparation
+
+`POLICY_ALLOW_STATIC_PRELOAD=true` opts a static Worker into authenticated policy preparation. It requires policy keys, allowed domains, and a nonempty `POLICY_ALLOWED_ADDRESSES_JSON` exact-address list. Example scope: `["inbox@example.test"]`. Install the separate secrets before deploying configuration that enables these features; incomplete opted-in configuration fails validation.
+
+Static preparation accepts only an enabled policy for an explicitly allowed existing static recipient whose mailbox matches `RECIPIENT_ROUTES_JSON`. It cannot disable static receiving or redirect it to another mailbox. Its response is HTTP 202 with `status: "prepared"`, which must not be treated as an applied PolicyAck or as evidence that v2 admission is running. The existing static handler continues creating v1 receipts. After an explicit dynamic deployment, retrying the prepared operation returns the normal HTTP 200 applied acknowledgment.
+
+When configured, `POLICY_ALLOWED_ADDRESSES_JSON` also restricts dynamic policy writes and dynamic admission. A nonempty exact policy scope is mandatory whenever dynamic routing and operator access are both enabled. It never creates a static fallback or silently changes other configured static receiving routes. Outer Cloudflare Email Routing rules remain an independent boundary.
+
+## Scoped operator inspection and reconciliation
+
+The operator endpoint is opt-in: `POST /internal/v1/gateway-operations`. Configure all of:
+
+- `OPERATOR_KEYS_JSON`, a secret JSON key ring, using credentials distinct from both ingestion and policy publication.
+- `OPERATOR_ALLOWED_ADDRESSES_JSON`, a nonempty exact-recipient list. There is no wildcard or domain-wide default.
+- `GATEWAY_ID`, a stable deployment identity containing 1–128 letters, digits, periods, underscores, or hyphens. It must match the identity signed into every operator request.
+
+Use the shared protocol's gateway-operation signing helpers. Requests are limited to 16 KiB and bind the operation, intended gateway identity, request ID, timestamp, and exact request bytes. Successful responses and errors after authentication are separately signed and bind the same request ID. Clients must verify response authentication, the expected gateway/address, and freshness before using any inspection. Invalid authentication receives an unsigned 401. Responses are not cacheable.
+
+An `inspect` operation is read-only and works in static or dynamic mode. It returns the configured mode, responding Worker version (through the optional `CF_VERSION_METADATA` binding), the effective `policyAllowedAddresses` list (`null` means no exact policy filter), static target, current D1 policy/digest, state counts, v1 pending count, active leases, and at most 50 receipt summaries per page. Summaries contain frozen mailbox/allocation evidence, body digest, state, size, and update time; they never expose bodies or sender addresses. D1 policy, counts, and the page are read in one transaction. Later pages are fresh live observations. Done counts include only tombstones still retained under the configured retention period.
+
+Inspection is not a writer fence: it cannot observe an old Worker invocation that has not inserted its receiving record yet, prove global deployment convergence, or prove that all v1 producers have stopped. A responding version identifies that response, not every in-flight invocation. An empty backlog and elapsed time do not authorize deleting the legacy acceptance tuple or unlocking legacy lifecycle edits. The backend must retain its immutable legacy binding and lifecycle guard during the bounded dynamic-compatibility stage.
+
+An `operation-status` operation is read-only and works in either mode. It requires the same signed request context, intended gateway identity, and exact recipient authorization, plus an operation UUID. The primary D1 lookup matches both address and operation ID. It returns a fresh signed observation with either `record: null` or the retained policy, its digest, and original `appliedAt` time. Stored identity and policy hashes are validated before returning evidence. The lookup does not publish an old snapshot, alter the current policy, retry delivery, or change admission.
+
+Retained operation evidence can establish that a particular policy was persisted after an acknowledgment was lost, even when a newer policy is now current. It is not proof that the historical policy is currently active, that static preparation had already switched to v2 admission, or that old writers have drained. Backend recovery must match the exact planned operation and digest, and import only the verified historical evidence needed for accepted-mail validation. Inspection's effective address scope must independently match the operator's intended recipient set before confirming bounded compatibility; `null` or a broader set is insufficient.
+
+A `reconcile` operation is dynamic-only and contains a full policy snapshot plus `expectedRemote` revision/digest. Null/null means the operator expects no current policy. The expected state is checked in the same D1 transaction as the monotonic update and applied-operation history. A stale observation or conflicting write returns a signed 409 `policy_precondition_failed`; it never silently increases the revision or overwrites a concurrent policy. A retained identical successful operation can return its historical ACK without modifying newer state. The backend still has to compare that ACK with its current local intent.
+
+This endpoint does not retry deliveries, delete raw objects, retire legacy routes, grant mailbox access, or change Cloudflare routing. Existing Queue and scheduled repair behavior is unchanged. Rollback must preserve D1/R2 data, pending bodies, legacy receipt compatibility, and historical policy evidence; do not infer that restoring a static configuration is safe after address ownership or receiving policy changes.

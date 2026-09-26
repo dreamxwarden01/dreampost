@@ -93,7 +93,8 @@ export class Gateway {
     let record: DeliveryRecord | undefined;
     if (this.deps.config.routingMode === 'dynamic') {
       const domain = recipient.slice(recipient.lastIndexOf('@') + 1);
-      if (!this.deps.config.allowedPolicyDomains.includes(domain)) {
+      if (!this.deps.config.allowedPolicyDomains.includes(domain)
+        || (this.deps.config.policyAllowedAddresses && !this.deps.config.policyAllowedAddresses.includes(recipient))) {
         message.setReject('Recipient is not configured'); return;
       }
       for (let attempt = 0; attempt < 3; attempt++) {

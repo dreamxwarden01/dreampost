@@ -46,7 +46,7 @@ export async function dispatchOnePolicy(service: AddressService, options: Policy
       `SELECT o.operation_id, h.payload, h.sha256, o.attempts FROM address_registry r
        JOIN address_policy_history h ON h.address = r.address AND h.revision = r.policy_revision
        JOIN address_policy_outbox o ON o.operation_id = h.operation_id
-       WHERE ((o.status = 'pending' AND o.available_at <= now()) OR (o.status = 'inflight' AND o.lease_until <= now()))
+       WHERE o.dispatch_kind = 'normal' AND ((o.status = 'pending' AND o.available_at <= now()) OR (o.status = 'inflight' AND o.lease_until <= now()))
        ORDER BY h.created_at FOR UPDATE OF r SKIP LOCKED LIMIT 1`,
     );
     claimed = rows[0];

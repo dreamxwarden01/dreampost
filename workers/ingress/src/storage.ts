@@ -1,6 +1,6 @@
-import { MAX_INBOUND_BYTES, normalizeRecipientAddress, validateMetadata } from '@dreampost/protocol';
-import type { DeliveryMetadata, RoutePolicy } from '@dreampost/protocol';
-import type { DeliveryPatch, DeliveryRecord, DeliveryState, Ledger, RawStore, StoredPolicy, StoredRaw } from './model.js';
+import { MAX_INBOUND_BYTES, normalizeRecipientAddress, validateMetadata, validateRoutePolicy, hashRoutePolicy } from '@dreampost/protocol';
+import type { DeliveryMetadata, GatewayReceiptSummary, RoutePolicy } from '@dreampost/protocol';
+import type { AppliedPolicyRecord, DeliveryPatch, DeliveryRecord, DeliveryState, ExpectedRemotePolicy, InspectionSnapshot, Ledger, RawStore, StoredPolicy, StoredRaw } from './model.js';
 
 interface Row {
   delivery_id: string;
@@ -32,8 +32,9 @@ const columns: Record<keyof DeliveryPatch, string> = {
 export class D1Ledger implements Ledger {
   constructor(private readonly db: D1Database) {}
 
-  async applyPolicy(policy: RoutePolicy, digest: string, now: number): Promise<'applied' | 'conflict'> {
+  async applyPolicy(policy: RoutePolicy, digest: string, now: number, expectedRemote?: ExpectedRemotePolicy): Promise<'applied' | 'conflict' | 'precondition_failed'> {
     const json = JSON.stringify(policy);
+    const expected = expectedRemote ?? { revision: null, sha256: null };
     // Complete snapshots may skip revisions. Monotonic update, operation-ID protection, and history commit together.
     const results = await this.db.batch([
       this.db.prepare(`INSERT INTO recipient_policies
@@ -41,6 +42,9 @@ export class D1Ledger implements Ledger {
         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
         WHERE NOT EXISTS (SELECT 1 FROM recipient_policy_operations WHERE operation_id = ? AND policy_digest <> ?)
           AND NOT EXISTS (SELECT 1 FROM recipient_policy_operations WHERE address = ? AND revision = ? AND policy_digest <> ?)
+          AND (? = 0
+            OR (? IS NULL AND NOT EXISTS (SELECT 1 FROM recipient_policies WHERE address = ?))
+            OR EXISTS (SELECT 1 FROM recipient_policies WHERE address = ? AND revision = ? AND policy_digest = ?))
         ON CONFLICT(address) DO UPDATE SET allocation_id = excluded.allocation_id, mailbox_id = excluded.mailbox_id,
           revision = excluded.revision, receive_enabled = excluded.receive_enabled, operation_id = excluded.operation_id,
           policy_digest = excluded.policy_digest, policy_json = excluded.policy_json, applied_at = excluded.applied_at
@@ -48,6 +52,7 @@ export class D1Ledger implements Ledger {
         policy.address, policy.allocationId, policy.mailboxId, policy.revision, Number(policy.receiveEnabled),
         policy.operationId, digest, json, now,
         policy.operationId, digest, policy.address, policy.revision, digest,
+        Number(expectedRemote !== undefined), expected.revision, policy.address, policy.address, expected.revision, expected.sha256,
       ),
       this.db.prepare(`INSERT INTO recipient_policy_operations
         (operation_id, address, revision, policy_digest, policy_json, applied_at)
@@ -57,10 +62,62 @@ export class D1Ledger implements Ledger {
         policy.operationId, policy.address, policy.revision, digest, json, now,
         policy.address, policy.revision, policy.operationId, digest,
       ),
-      this.db.prepare('SELECT policy_digest FROM recipient_policy_operations WHERE operation_id = ?').bind(policy.operationId),
+      this.db.prepare(`SELECT
+        (SELECT policy_digest FROM recipient_policy_operations WHERE operation_id = ?) AS recorded_digest,
+        (SELECT revision FROM recipient_policies WHERE address = ?) AS current_revision,
+        (SELECT policy_digest FROM recipient_policies WHERE address = ?) AS current_digest`).bind(policy.operationId, policy.address, policy.address),
     ]);
-    const recorded = results[2]?.results[0] as { policy_digest?: string } | undefined;
-    return recorded?.policy_digest === digest ? 'applied' : 'conflict';
+    const observed = results[2]?.results[0] as { recorded_digest: string | null; current_revision: number | null; current_digest: string | null } | undefined;
+    // A retained exact operation proves an earlier success; it never overwrites a later snapshot.
+    if (observed?.recorded_digest === digest) return 'applied';
+    if (expectedRemote && (observed?.current_revision !== expected.revision || observed?.current_digest !== expected.sha256)) return 'precondition_failed';
+    return 'conflict';
+  }
+
+  async inspectRecipient(address: string, afterDeliveryId: string | undefined, now: number): Promise<InspectionSnapshot> {
+    // One D1 transaction gives the policy, aggregate counts, and this page a coherent observation.
+    // Pages remain live observations, not a writer fence or an immutable export.
+    const results = await this.db.batch([
+      this.db.prepare('SELECT policy_json, policy_digest FROM recipient_policies WHERE address = ?').bind(address),
+      this.db.prepare(`SELECT state, count(*) AS count,
+        sum(CASE WHEN json_extract(metadata_json, '$.version') = 1 AND state <> 'done' THEN 1 ELSE 0 END) AS legacy_pending,
+        sum(CASE WHEN lease_until > ? THEN 1 ELSE 0 END) AS active_leases
+        FROM deliveries WHERE lower(json_extract(metadata_json, '$.envelopeTo')) = ? GROUP BY state`).bind(now, address),
+      this.db.prepare(`SELECT delivery_id, metadata_json, sha256, state, lease_until, updated_at FROM deliveries
+        WHERE lower(json_extract(metadata_json, '$.envelopeTo')) = ? AND (? IS NULL OR delivery_id > ?)
+        ORDER BY delivery_id LIMIT 51`).bind(address, afterDeliveryId ?? null, afterDeliveryId ?? null),
+    ]);
+    const policyRow = results[0]?.results[0] as { policy_json: string; policy_digest: string } | undefined;
+    const states: Record<DeliveryState, number> = { receiving: 0, stored: 0, blocked: 0, delivered_pending_delete: 0, done: 0 };
+    let legacyPending = 0;
+    let activeLeases = 0;
+    for (const row of results[1]!.results as { state: DeliveryState; count: number; legacy_pending: number; active_leases: number }[]) {
+      states[row.state] = Number(row.count);
+      legacyPending += Number(row.legacy_pending);
+      activeLeases += Number(row.active_leases);
+    }
+    const rows = results[2]!.results as Pick<Row, 'delivery_id' | 'metadata_json' | 'sha256' | 'state' | 'lease_until' | 'updated_at'>[];
+    const receipts: GatewayReceiptSummary[] = rows.slice(0, 50).map(row => {
+      const metadata = validateMetadata(JSON.parse(row.metadata_json));
+      return { deliveryId: row.delivery_id, version: metadata.version, mailboxId: metadata.mailboxId,
+        ...(metadata.version === 2 ? { allocationId: metadata.allocationId, routeRevision: metadata.routeRevision, policyDigest: metadata.policyDigest } : {}),
+        sha256: row.sha256, state: row.state, activeLease: row.lease_until !== null && row.lease_until > now,
+        updatedAt: row.updated_at, rawSize: metadata.rawSize };
+    });
+    return { policy: policyRow ? { policy: JSON.parse(policyRow.policy_json) as RoutePolicy, sha256: policyRow.policy_digest } : null,
+      states, legacyPending, activeLeases, receipts, nextCursor: rows.length > 50 ? rows[49]!.delivery_id : null };
+  }
+
+  async getAppliedOperation(address: string, operationId: string): Promise<AppliedPolicyRecord | null> {
+    const row = await this.db.withSession('first-primary').prepare(`SELECT policy_json, policy_digest, applied_at
+      FROM recipient_policy_operations WHERE operation_id = ? AND address = ?`).bind(operationId, address)
+      .first<{ policy_json: string; policy_digest: string; applied_at: number }>();
+    if (!row) return null;
+    const policy = validateRoutePolicy(JSON.parse(row.policy_json));
+    if (policy.address !== address || policy.operationId !== operationId
+      || !Number.isSafeInteger(row.applied_at) || row.applied_at < 0
+      || await hashRoutePolicy(policy) !== row.policy_digest) throw new Error('Applied policy evidence is inconsistent');
+    return { policy, sha256: row.policy_digest, appliedAt: row.applied_at };
   }
 
   async getPolicy(address: string): Promise<StoredPolicy | null> {

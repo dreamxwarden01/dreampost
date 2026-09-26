@@ -4,3 +4,11 @@ INGEST_SECRET=development-only-change-this-32-byte-secret
 # Optional local policy control; ROUTING_MODE remains static unless explicitly changed.
 # Use a separate real Worker secret for POLICY_KEYS_JSON in deployment.
 # POLICY_KEYS_JSON={"control-development":"development-only-policy-secret-change-before-use"}
+
+# Optional operator inspection/reconciliation uses a third, distinct secret key ring.
+# OPERATOR_KEYS_JSON={"operator-development":"development-only-operator-secret-change-before-use"}
+# OPERATOR_ALLOWED_ADDRESSES_JSON=["inbox@example.test"]
+# GATEWAY_ID=example-development-gateway
+# Static preparation additionally requires policy keys, domains, and this exact scope:
+# POLICY_ALLOW_STATIC_PRELOAD=true
+# POLICY_ALLOWED_ADDRESSES_JSON=["inbox@example.test"]

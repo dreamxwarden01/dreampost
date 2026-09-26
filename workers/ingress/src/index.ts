@@ -1,5 +1,6 @@
-import { POLICY_PATH } from '@dreampost/protocol';
+import { GATEWAY_OPERATION_PATH, POLICY_PATH } from '@dreampost/protocol';
 import { handlePolicyRequest } from './policies.js';
+import { handleOperationRequest } from './operations.js';
 import { readConfig } from './config.js';
 import type { GatewayVariables } from './config.js';
 import { Gateway } from './core.js';
@@ -10,6 +11,7 @@ export interface Env extends GatewayVariables {
   DB: D1Database;
   RAW_MAIL: R2Bucket;
   DELIVERY_QUEUE: Queue<{ deliveryId: string }>;
+  CF_VERSION_METADATA?: { id: string };
 }
 
 function log(event: string, deliveryId?: string): void {
@@ -25,10 +27,18 @@ function gateway(env: Env): Gateway {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (new URL(request.url).pathname !== POLICY_PATH || (env.ROUTING_MODE ?? 'static') !== 'dynamic') {
+    const path = new URL(request.url).pathname;
+    const policyEnabled = (env.ROUTING_MODE ?? 'static') === 'dynamic' || env.POLICY_ALLOW_STATIC_PRELOAD === 'true';
+    if ((path !== POLICY_PATH || !policyEnabled) && (path !== GATEWAY_OPERATION_PATH || !env.OPERATOR_KEYS_JSON)) {
       return Response.json({ error: 'not_found' }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
     }
-    try { return await handlePolicyRequest(request, readConfig(env), new D1Ledger(env.DB)); }
+    try {
+      const config = readConfig(env);
+      const ledger = new D1Ledger(env.DB);
+      return path === GATEWAY_OPERATION_PATH
+        ? await handleOperationRequest(request, config, ledger, env.CF_VERSION_METADATA?.id ?? null)
+        : await handlePolicyRequest(request, config, ledger);
+    }
     catch {
       log('policy_control_failed');
       return Response.json({ error: 'policy_temporarily_unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });

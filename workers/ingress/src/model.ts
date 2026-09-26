@@ -1,4 +1,4 @@
-import type { DeliveryMetadata, RoutePolicy } from '@dreampost/protocol';
+import type { DeliveryMetadata, GatewayReceiptSummary, RoutePolicy } from '@dreampost/protocol';
 
 export type DeliveryState = 'receiving' | 'stored' | 'blocked' | 'delivered_pending_delete' | 'done';
 
@@ -21,10 +21,22 @@ export type DeliveryPatch = Partial<Pick<DeliveryRecord,
   'sha256' | 'state' | 'updatedAt' | 'nextAttemptAt' | 'leaseToken' | 'leaseUntil' | 'lastError'>>;
 
 export interface StoredPolicy { policy: RoutePolicy; sha256: string; }
+export interface AppliedPolicyRecord extends StoredPolicy { appliedAt: number; }
+export interface ExpectedRemotePolicy { revision: number | null; sha256: string | null; }
+export interface InspectionSnapshot {
+  policy: StoredPolicy | null;
+  states: Record<DeliveryState, number>;
+  legacyPending: number;
+  activeLeases: number;
+  receipts: GatewayReceiptSummary[];
+  nextCursor: string | null;
+}
 
 export interface Ledger {
-  applyPolicy(policy: RoutePolicy, digest: string, now: number): Promise<'applied' | 'conflict'>;
+  applyPolicy(policy: RoutePolicy, digest: string, now: number, expectedRemote?: ExpectedRemotePolicy): Promise<'applied' | 'conflict' | 'precondition_failed'>;
+  inspectRecipient(address: string, afterDeliveryId: string | undefined, now: number): Promise<InspectionSnapshot>;
   getPolicy(address: string): Promise<StoredPolicy | null>;
+  getAppliedOperation(address: string, operationId: string): Promise<AppliedPolicyRecord | null>;
   admitDynamic(record: DeliveryRecord, address: string): Promise<boolean>;
   insert(record: DeliveryRecord): Promise<void>;
   get(id: string): Promise<DeliveryRecord | null>;

@@ -8,6 +8,9 @@ export interface GatewayConfig {
   routingMode: 'static' | 'dynamic';
   policyKeys: Record<string, string>;
   allowedPolicyDomains: string[];
+  allowStaticPreload?: boolean;
+  policyAllowedAddresses?: string[];
+  operator?: { keys: Record<string, string>; allowedAddresses: string[]; gatewayId: string };
 }
 
 export interface GatewayVariables {
@@ -20,10 +23,29 @@ export interface GatewayVariables {
   ROUTING_MODE?: string;
   POLICY_KEYS_JSON?: string;
   POLICY_ALLOWED_DOMAINS_JSON?: string;
+  POLICY_ALLOW_STATIC_PRELOAD?: string;
+  POLICY_ALLOWED_ADDRESSES_JSON?: string;
+  OPERATOR_KEYS_JSON?: string;
+  OPERATOR_ALLOWED_ADDRESSES_JSON?: string;
+  GATEWAY_ID?: string;
+}
+
+function configuredAddresses(value: string | undefined, required: boolean): string[] | undefined {
+  if (value === undefined && !required) return undefined;
+  let parsed: unknown;
+  try { parsed = JSON.parse(value ?? 'null'); } catch { throw new Error('Invalid address scope'); }
+  if (!Array.isArray(parsed) || !parsed.length || parsed.some(address => typeof address !== 'string'
+    || !/^[^\s@*]+@[^\s@*]+$/.test(address))) throw new Error('A nonempty exact address scope is required');
+  return [...new Set((parsed as string[]).map(normalizeRecipientAddress))];
 }
 
 export function readConfig(env: GatewayVariables): GatewayConfig {
   const routingMode = env.ROUTING_MODE ?? 'static';
+  const allowStaticPreload = env.POLICY_ALLOW_STATIC_PRELOAD === 'true';
+  if (env.POLICY_ALLOW_STATIC_PRELOAD !== undefined && !['true', 'false'].includes(env.POLICY_ALLOW_STATIC_PRELOAD)) {
+    throw new Error('Invalid static preload setting');
+  }
+  const policyAllowedAddresses = configuredAddresses(env.POLICY_ALLOWED_ADDRESSES_JSON, allowStaticPreload);
   if (routingMode !== 'static' && routingMode !== 'dynamic') throw new Error('Invalid routing mode');
   let value: unknown;
   try {
@@ -59,7 +81,7 @@ export function readConfig(env: GatewayVariables): GatewayConfig {
   }
   const policyKeys: Record<string, string> = Object.create(null) as Record<string, string>;
   let allowedPolicyDomains: string[] = [];
-  if (routingMode === 'dynamic') {
+  if (routingMode === 'dynamic' || allowStaticPreload) {
     let keys: unknown;
     let domains: unknown;
     try {
@@ -83,6 +105,31 @@ export function readConfig(env: GatewayVariables): GatewayConfig {
     }
     allowedPolicyDomains = [...new Set((domains as string[]).map(domain => domain.toLowerCase()))];
   }
+  if ((routingMode === 'dynamic' || allowStaticPreload) && policyAllowedAddresses?.some(address =>
+    !allowedPolicyDomains.includes(address.slice(address.lastIndexOf('@') + 1)))) throw new Error('Policy address is outside the allowed domains');
+  let operator: GatewayConfig['operator'];
+  if (env.OPERATOR_KEYS_JSON !== undefined || env.OPERATOR_ALLOWED_ADDRESSES_JSON !== undefined || env.GATEWAY_ID !== undefined) {
+    if (!env.GATEWAY_ID || !/^[A-Za-z0-9._-]{1,128}$/.test(env.GATEWAY_ID)) throw new Error('Invalid gateway identity');
+    const allowedAddresses = configuredAddresses(env.OPERATOR_ALLOWED_ADDRESSES_JSON, true)!;
+    let parsed: unknown;
+    try { parsed = JSON.parse(env.OPERATOR_KEYS_JSON ?? 'null'); } catch { throw new Error('Invalid operator key ring'); }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Object.keys(parsed).length) throw new Error('Operator keys are required');
+    let configuredPolicyKeys: unknown;
+    try { configuredPolicyKeys = JSON.parse(env.POLICY_KEYS_JSON ?? '{}'); } catch { throw new Error('Invalid policy key ring'); }
+    if (!configuredPolicyKeys || typeof configuredPolicyKeys !== 'object' || Array.isArray(configuredPolicyKeys)) throw new Error('Invalid policy key ring');
+    const forbiddenSecrets = new Set([env.INGEST_SECRET, ...Object.values(configuredPolicyKeys).filter((value): value is string => typeof value === 'string')]);
+    const keys: Record<string, string> = Object.create(null) as Record<string, string>;
+    for (const [id, secret] of Object.entries(parsed)) {
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || typeof secret !== 'string' || new TextEncoder().encode(secret).length < 32
+        || forbiddenSecrets.has(secret)) throw new Error('Invalid or reused operator key');
+      keys[id] = secret;
+    }
+    operator = { keys, allowedAddresses, gatewayId: env.GATEWAY_ID };
+  }
+  if (routingMode === 'dynamic' && operator && !policyAllowedAddresses?.length) {
+    throw new Error('Operator-enabled dynamic routing requires an exact policy address scope');
+  }
   return { routes, backendUrl: url.href, key: { id: env.INGEST_KEY_ID, secret: env.INGEST_SECRET },
-    doneRetentionDays, routingMode, policyKeys, allowedPolicyDomains };
+    doneRetentionDays, routingMode, policyKeys, allowedPolicyDomains, allowStaticPreload,
+    ...(policyAllowedAddresses ? { policyAllowedAddresses } : {}), ...(operator ? { operator } : {}) };
 }

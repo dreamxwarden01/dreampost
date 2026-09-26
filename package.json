@@ -24,7 +24,8 @@
     "sso:registration": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/commands/sso.ts registration",
     "sso:sync": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/commands/sso.ts sync",
     "dev:api:sso": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/server.ts",
-    "jobs:policies": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/commands/policies.ts"
+    "jobs:policies": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/commands/policies.ts",
+    "gateway:operator": "node --env-file=.local/dev.env --env-file=.local/gateway-operator.env --import tsx apps/api/src/commands/gateway.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
