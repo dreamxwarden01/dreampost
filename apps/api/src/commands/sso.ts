@@ -8,6 +8,6 @@ if (!['registration', 'sync'].includes(action ?? '')) throw new Error('Use regis
 const pool = new pg.Pool({ connectionString: config.databaseUrl });
 try {
   const auth = new AuthService(pool, config.auth);
-  if (action === 'registration') console.log(JSON.stringify({ ...auth.oidc.registrationMaterial(), jwks: auth.oidc.publicJwks() }, null, 2));
+  if (action === 'registration') console.log(JSON.stringify(auth.registrationMaterial(), null, 2));
   else { await auth.publishRoleCatalog(); console.log('DreamPost role catalog acknowledged by the configured SSO.'); }
 } finally { await pool.end(); }

@@ -68,6 +68,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     if (!privateJwk || typeof privateJwk !== 'object' || !('d' in privateJwk)) throw new Error('SSO client private key is missing');
     auth = {
       issuer: required('SSO_ISSUER'), clientId: required('SSO_CLIENT_ID'), publicBaseUrl,
+      ...(env['SSO_CLIENT_NAME'] ? { clientName: env['SSO_CLIENT_NAME'] } : {}),
       clientPrivateJwk: privateJwk as AuthConfig['clientPrivateJwk'],
       ...(env['SSO_INTERNAL_BASE_URL'] ? { internalBaseUrl: env['SSO_INTERNAL_BASE_URL'] } : {}),
       ...(env['SSO_ACCOUNT_PORTAL_URL'] ? { accountPortalUrl: env['SSO_ACCOUNT_PORTAL_URL'] } : {}),

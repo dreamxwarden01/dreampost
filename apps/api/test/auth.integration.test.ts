@@ -172,7 +172,7 @@ describe.skipIf(!databaseUrl)('DreamSSO authentication with real PostgreSQL', ()
   it('publishes a signed RP catalog and exposes registration material without private keys', async () => {
     expect(mock.published[0]).toMatchObject([{ type: 'roles.sync', payload: { default_role: 1,
       roles: [{ role_id: 0, name: 'postmaster' }, { role_id: 1, name: 'member' }, { role_id: 2, name: 'viewer' }] } }]);
-    expect(auth.registrationMaterial()).toMatchObject({ client_id: clientId, events_uri: `${origin}/backchannel/events` });
+    expect(auth.registrationMaterial()).toMatchObject({ client_id: clientId, hostname: 'mail.example.test', events_path: '/backchannel/events' });
     const jwks = (await app.inject({ url: '/.well-known/jwks.json' })).json();
     expect(jwks.keys[0].d).toBeUndefined();
     expect(jwks.keys[0].x).toBe(clientPublic.x);
@@ -181,6 +181,13 @@ describe.skipIf(!databaseUrl)('DreamSSO authentication with real PostgreSQL', ()
     await expect(auth.publishRoleCatalog()).rejects.toThrow();
     expect((await auth.catalogStatus()).syncedAt).toBeNull();
     expect((await app.inject({ url: '/auth/login' })).statusCode).toBe(503);
+  });
+
+  it('publishes the configured display name instead of overwriting a development client name', async () => {
+    const named = new AuthService(pool, { ...config, clientName: 'DreamPost Dev' }, { fetch: mock.fetch, now: () => mock.now });
+    expect(named.registrationMaterial().name).toBe('DreamPost Dev');
+    await named.publishRoleCatalog();
+    expect(mock.published.at(-1)).toMatchObject([{ type: 'roles.sync', payload: { site_name: 'DreamPost Dev' } }]);
   });
 
   it('does not reuse catalog publication status for a different issuer or client', async () => {

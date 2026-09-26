@@ -66,7 +66,7 @@ export class AuthService {
       this.pool.query<{ default_role_id: number }>('SELECT default_role_id FROM auth_settings WHERE singleton'),
     ]);
     if (!settings[0] || !roles.some((role) => role.role_id === settings[0]!.default_role_id)) throw new Error('Invalid local default role');
-    await this.oidc.publishRoles({ site_name: 'DreamPost', default_role: settings[0].default_role_id,
+    await this.oidc.publishRoles({ site_name: this.oidc.clientName, default_role: settings[0].default_role_id,
       roles: roles.map((role) => ({ role_id: role.role_id, name: role.name, level: role.permission_level, is_system: role.is_system })) });
     await this.pool.query('UPDATE auth_settings SET last_catalog_sync = $1, catalog_issuer = $2, catalog_client_id = $3 WHERE singleton', [new Date(this.now()), this.oidc.issuer, this.config.clientId]);
   }

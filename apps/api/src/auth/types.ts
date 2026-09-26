@@ -4,6 +4,7 @@ import type { Actor } from './service.js';
 export interface AuthConfig {
   issuer: string;
   clientId: string;
+  clientName?: string;
   publicBaseUrl: string;
   clientPrivateJwk: JWK;
   internalBaseUrl?: string;

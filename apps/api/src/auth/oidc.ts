@@ -12,6 +12,7 @@ function baseUrl(value: string, allowLocal: boolean): string {
 
 export class OidcClient {
   readonly issuer: string;
+  readonly clientName: string;
   readonly internalBase: string;
   readonly publicBase: string;
   readonly origin: string;
@@ -25,11 +26,16 @@ export class OidcClient {
   constructor(readonly config: AuthConfig, options: AuthOptions = {}) {
     this.issuer = baseUrl(config.issuer, config.allowInsecureLocal === true);
     this.internalBase = baseUrl(config.internalBaseUrl ?? config.issuer, config.allowInsecureLocal === true);
-    this.publicBase = baseUrl(config.publicBaseUrl, config.allowInsecureLocal === true);
-    this.origin = new URL(this.publicBase).origin;
+    const publicUrl = new URL(baseUrl(config.publicBaseUrl, config.allowInsecureLocal === true));
+    if (publicUrl.pathname !== '/') throw new Error('The application public base URL must be an origin');
+    this.publicBase = publicUrl.origin;
+    this.origin = publicUrl.origin;
     if (config.accountPortalUrl) baseUrl(config.accountPortalUrl, config.allowInsecureLocal === true);
-    if (this.origin !== this.publicBase) throw new Error('The application public base URL must be an origin');
-    if (!config.clientId || config.clientId.length > 200) throw new Error('A valid SSO client ID is required');
+    if (typeof config.clientId !== 'string' || !/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(config.clientId)) {
+      throw new Error('SSO client IDs must use 1-64 lowercase slug characters with alphanumeric ends');
+    }
+    this.clientName = (config.clientName ?? 'DreamPost').trim();
+    if (!this.clientName || this.clientName.length > 100) throw new Error('SSO client display names must contain 1-100 characters');
     const jwk = config.clientPrivateJwk;
     if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || !jwk.d || !jwk.x || !jwk.kid) throw new Error('The RP requires an Ed25519 private JWK with a key ID');
     this.key = importJWK(jwk, 'EdDSA');
@@ -48,10 +54,15 @@ export class OidcClient {
   }
 
   registrationMaterial() {
-    return { client_id: this.config.clientId, name: 'DreamPost',
-      redirect_uris: [this.redirectUri], jwks_uri: `${this.publicBase}/.well-known/jwks.json`,
-      events_uri: `${this.publicBase}/backchannel/events`, allowed_scopes: ['openid', 'profile', 'email'],
-      token_endpoint_auth_method: 'private_key_jwt' };
+    const url = new URL(this.publicBase);
+    if (url.protocol !== 'https:' || url.port || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(url.hostname)) {
+      throw new Error('DreamSSO registration requires an HTTPS hostname on port 443');
+    }
+    // DreamSSO's admin API composes full URLs from one hostname and relative paths.
+    return { client_id: this.config.clientId, name: this.clientName, hostname: url.hostname,
+      redirect_paths: ['/auth/callback'], events_path: '/backchannel/events',
+      jwks_uri: `${this.publicBase}/.well-known/jwks.json`, jwks: null,
+      allowed_scopes: ['openid', 'profile', 'email'], is_first_party: true, entry_policy: 'opt_in' };
   }
 
   authorizeUrl(flow: { state: string; nonce: string; challenge: string }): string {
