@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { FastifyRequest } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { ApiError } from '../errors.js';
@@ -61,14 +62,78 @@ export class AuthService {
   }
 
   async publishRoleCatalog(): Promise<void> {
-    const [{ rows: roles }, { rows: settings }] = await Promise.all([
-      this.pool.query<{ role_id: number; name: string; permission_level: number; is_system: boolean }>('SELECT * FROM auth_roles ORDER BY permission_level, role_id'),
-      this.pool.query<{ default_role_id: number }>('SELECT default_role_id FROM auth_settings WHERE singleton'),
-    ]);
-    if (!settings[0] || !roles.some((role) => role.role_id === settings[0]!.default_role_id)) throw new Error('Invalid local default role');
-    await this.oidc.publishRoles({ site_name: this.oidc.clientName, default_role: settings[0].default_role_id,
-      roles: roles.map((role) => ({ role_id: role.role_id, name: role.name, level: role.permission_level, is_system: role.is_system })) });
-    await this.pool.query('UPDATE auth_settings SET last_catalog_sync = $1, catalog_issuer = $2, catalog_client_id = $3 WHERE singleton', [new Date(this.now()), this.oidc.issuer, this.config.clientId]);
+    await this.publishCatalog();
+  }
+
+  private async publishCatalog(event?: Event): Promise<void> {
+    const client = await this.pool.connect();
+    const lockScope = [`dreampost:roles.sync:${this.oidc.issuer}`, this.config.clientId];
+    let locked = false;
+    let transaction = false;
+    let releaseError: Error | undefined;
+    try {
+      // Session-level ownership spans reservation commit, HTTP, and success recording.
+      await client.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2))', lockScope);
+      locked = true;
+      if (event && (await client.query('SELECT 1 FROM auth_events WHERE issuer = $1 AND event_id = $2', [this.oidc.issuer, event.id])).rowCount) return;
+      const clock = await client.query<{ last_issued_at: string }>(
+        `SELECT GREATEST(
+          COALESCE((SELECT last_issued_at FROM auth_catalog_publications WHERE issuer = $1 AND client_id = $2), 0),
+          COALESCE((SELECT floor(EXTRACT(EPOCH FROM last_catalog_sync))::bigint FROM auth_settings
+                    WHERE singleton AND catalog_issuer = $1 AND catalog_client_id = $2), 0)
+        ) AS last_issued_at`, [this.oidc.issuer, this.config.clientId],
+      );
+      const lastIssuedAt = Number(clock.rows[0]!.last_issued_at);
+      if (!Number.isSafeInteger(lastIssuedAt) || lastIssuedAt < 0) throw new Error('Invalid role publication clock');
+      // Wait for real time rather than minting a future-dated JWT to evade the SSO ordering guard.
+      const deadline = Date.now() + 5000;
+      while (Math.floor(this.now() / 1000) <= lastIssuedAt) {
+        const remaining = (lastIssuedAt + 1) * 1000 - this.now();
+        if (!Number.isFinite(remaining) || remaining > 5000 || Date.now() >= deadline) {
+          throw new ApiError(503, 'role_publication_clock_not_ready');
+        }
+        await sleep(Math.max(1, Math.min(remaining, 1000)));
+      }
+      const issuedAt = Math.floor(this.now() / 1000);
+      if (!Number.isSafeInteger(issuedAt) || issuedAt <= lastIssuedAt) throw new Error('Invalid role publication timestamp');
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+      transaction = true;
+      await client.query('SET LOCAL synchronous_commit = on');
+      const { rows: roles } = await client.query<{ role_id: number; name: string; permission_level: number; is_system: boolean }>('SELECT * FROM auth_roles ORDER BY permission_level, role_id');
+      const { rows: settings } = await client.query<{ default_role_id: number }>('SELECT default_role_id FROM auth_settings WHERE singleton');
+      if (!settings[0] || !roles.some((role) => role.role_id === settings[0]!.default_role_id)) throw new Error('Invalid local default role');
+      const payload = { site_name: this.oidc.clientName, default_role: settings[0].default_role_id,
+        roles: roles.map((role) => ({ role_id: role.role_id, name: role.name, level: role.permission_level, is_system: role.is_system })) };
+      await client.query(`INSERT INTO auth_catalog_publications (issuer, client_id, last_issued_at) VALUES ($1, $2, $3)
+        ON CONFLICT (issuer, client_id) DO UPDATE SET last_issued_at = EXCLUDED.last_issued_at`,
+      [this.oidc.issuer, this.config.clientId, issuedAt]);
+      await client.query('COMMIT');
+      transaction = false;
+
+      await this.oidc.publishRoles(payload, issuedAt);
+
+      await client.query('BEGIN');
+      transaction = true;
+      await client.query('UPDATE auth_settings SET last_catalog_sync = $1, catalog_issuer = $2, catalog_client_id = $3 WHERE singleton', [new Date(this.now()), this.oidc.issuer, this.config.clientId]);
+      if (event) await client.query('INSERT INTO auth_events (issuer, event_id, event_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [this.oidc.issuer, event.id, event.type]);
+      await client.query('COMMIT');
+      transaction = false;
+    } catch (error) {
+      if (transaction) {
+        try { await client.query('ROLLBACK'); }
+        catch { releaseError = new Error('Role publication rollback failed'); }
+      }
+      throw error;
+    } finally {
+      if (locked) {
+        try {
+          const result = await client.query<{ unlocked: boolean }>('SELECT pg_advisory_unlock(hashtext($1), hashtext($2)) AS unlocked', lockScope);
+          if (!result.rows[0]?.unlocked) releaseError = new Error('Role publication lock was not released');
+        } catch { releaseError = new Error('Role publication lock release failed'); }
+      }
+      // A connection with uncertain session-lock ownership must never return to the pool.
+      client.release(releaseError);
+    }
   }
 
   /** Pass the business transaction client to retain the principal lock through mutation commit. */
@@ -291,6 +356,12 @@ export class AuthService {
   }
 
   private async applyEvent(event: Event, issuedAt: number): Promise<void> {
+    if (event.type === 'roles.sync_request') {
+      // Publication owns its connection and persists event completion only after the SSO accepts it.
+      // Do not retain an event transaction while waiting for a second pool connection.
+      await this.publishCatalog(event);
+      return;
+    }
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -316,9 +387,6 @@ export class AuthService {
       } else if (event.type === 'account.profile_change') {
         await client.query('UPDATE principals SET avatar = $3, profile_version = profile_version + 1 WHERE issuer = $1 AND subject = $2',
           [this.oidc.issuer, payload.sub, payload.avatar]);
-      } else if (event.type === 'roles.sync_request') {
-        // Publication is explicit and must succeed before the request is marked processed.
-        await this.publishRoleCatalog();
       }
       // Unknown types are acknowledged for ecosystem forward compatibility.
       await client.query('COMMIT');

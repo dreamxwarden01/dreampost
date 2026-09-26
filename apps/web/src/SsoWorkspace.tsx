@@ -19,6 +19,8 @@ export function SsoWorkspace() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [redirecting, setRedirecting] = useState(false);
+  const navigating = useRef(false);
   const profileRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!profileOpen) return;
@@ -28,11 +30,20 @@ export function SsoWorkspace() {
     return () => { document.removeEventListener('pointerdown', click); document.removeEventListener('keydown', key); };
   }, [profileOpen]);
   const reload = useCallback(async (signal?: AbortSignal) => {
+    if (navigating.current) return;
     try {
       const current = await sessionRequest<UserSession>('/auth/session', { signal });
       if (signal?.aborted) return;
       setSession(current);
-      if (!current.actor) { setMailboxes([]); setSelected(''); return; }
+      if (!current.actor) {
+        setMailboxes([]); setSelected(''); setError('');
+        if (current.catalog.syncedAt && !navigating.current) {
+          navigating.current = true;
+          setRedirecting(true);
+          window.location.replace('/auth/login');
+        }
+        return;
+      }
       if (!current.actor.permissions.includes('mailbox.use')) { setMailboxes([]); setSelected(''); setView('addresses'); setError(''); return; }
       const boxes = await getMailboxes(signal ?? new AbortController().signal);
       if (signal?.aborted) return;
@@ -40,7 +51,7 @@ export function SsoWorkspace() {
       if (boxes.length && !boxes[0]?.address) setView('addresses');
       setSelected(previous => boxes.some(box => box.id === previous) ? previous : boxes[0]?.id ?? '');
       setError('');
-    } catch (failure) { if (!signal?.aborted) setError(errorMessage(failure)); }
+    } catch (failure) { if (!signal?.aborted) { navigating.current = false; setRedirecting(false); setError(errorMessage(failure)); } }
     finally { if (!signal?.aborted) setLoading(false); }
   }, []);
   useEffect(() => {
@@ -56,12 +67,14 @@ export function SsoWorkspace() {
     if (!session?.csrfToken) return;
     try {
       const result = await sessionRequest<{ logoutUrl: string }>('/auth/logout', { method: 'POST', csrfToken: session.csrfToken });
+      navigating.current = true; setRedirecting(true);
       setSession(null); setMailboxes([]); setSelected('');
       window.location.assign(result.logoutUrl);
-    } catch (failure) { setError(errorMessage(failure)); }
+    } catch (failure) { navigating.current = false; setRedirecting(false); setError(errorMessage(failure)); }
   }
+  if (redirecting) return <main className="connection-page"><section className="connection-card"><h1>DreamPost</h1><p role="status">Redirecting to DreamSSO…</p></section></main>;
   if (loading) return <main className="connection-page"><section className="connection-card"><h1>DreamPost</h1><p>Loading your account…</p></section></main>;
-  if (!session?.actor) return <main className="connection-page"><section className="connection-card"><p className="eyebrow">Local mail, in your hands</p><h1>Welcome to DreamPost</h1><p>Sign in with your organization account to open your mail.</p>{error && <p className="error-panel" role="alert">{error}</p>}{session?.catalog.syncedAt ? <a className="button primary" href="/auth/login">Sign in with DreamSSO</a> : <p role="status">Sign-in is being configured. Your administrator needs to finish connecting DreamSSO.</p>}<button className="text-button" onClick={() => void reload()}>Check again</button></section></main>;
+  if (!session?.actor) return <main className="connection-page"><section className="connection-card"><p className="eyebrow">Local mail, in your hands</p><h1>{error ? 'Unable to sign you in' : 'Sign-in is not ready'}</h1>{error ? <p className="error-panel" role="alert">{error}</p> : <p role="status">Your administrator needs to finish connecting DreamSSO.</p>}<button className="button primary" onClick={() => void reload()}>Try again</button></section></main>;
   const mailbox = mailboxes.find(item => item.id === selected);
   const name = session.profile?.display_name || session.actor.username;
   const accountUrl = session.accountPortalUrl && /^https?:\/\//.test(session.accountPortalUrl) ? session.accountPortalUrl : null;

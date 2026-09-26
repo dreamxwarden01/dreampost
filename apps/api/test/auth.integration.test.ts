@@ -22,7 +22,9 @@ class MockIssuer {
   tokenExchanges = 0;
   published: unknown[] = [];
   failPublication = false;
-  now = Date.now();
+  private clockOffset = 0;
+  get now() { return Date.now() + this.clockOffset; }
+  set now(value: number) { this.clockOffset = value - Date.now(); }
   constructor(readonly issuerPrivateJwk: JWK, readonly issuerPublicJwk: JWK, readonly clientPublicJwk: JWK) {}
 
   async signed(payload: Record<string, unknown>, options: { typ?: string; aud?: string; iss?: string; iat?: number } = {}) {
@@ -104,7 +106,7 @@ describe.skipIf(!databaseUrl)('DreamSSO authentication with real PostgreSQL', ()
   beforeEach(async () => {
     if (app) await app.close();
     await pool.query('TRUNCATE principals CASCADE');
-    await pool.query('TRUNCATE auth_flows, auth_events, auth_revoked_sids, auth_subject_invalidations');
+    await pool.query('TRUNCATE auth_flows, auth_events, auth_revoked_sids, auth_subject_invalidations, auth_catalog_publications');
     await pool.query('UPDATE auth_settings SET last_catalog_sync = NULL');
     mock = new MockIssuer(issuerPrivate, issuerPublic, clientPublic);
     provisioned = [];

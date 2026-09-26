@@ -82,7 +82,8 @@ describe.skipIf(!databaseUrl)('application SSO and mailbox authorization with Po
   beforeEach(async () => {
     if (app) await app.close();
     await pool.query('TRUNCATE principals, mailboxes CASCADE');
-    await pool.query('TRUNCATE auth_revoked_sids');
+    await pool.query('TRUNCATE auth_revoked_sids, auth_catalog_publications');
+    await pool.query('UPDATE auth_settings SET last_catalog_sync = NULL');
     alice = await user('alice', 1);
     bob = await user('bob', 1);
     postmaster = await user('postmaster-operator', 0);

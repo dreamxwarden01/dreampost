@@ -80,8 +80,10 @@ export class OidcClient {
       .setIssuedAt(now).setExpirationTime(now + 60).setJti(randomUUID()).sign(await this.key);
   }
 
-  async signEventToken(events: Array<{ id: string; type: string; payload: unknown }>): Promise<string> {
-    const now = Math.floor(this.now() / 1000);
+  async signEventToken(events: Array<{ id: string; type: string; payload: unknown }>, issuedAt?: number): Promise<string> {
+    const clock = Math.floor(this.now() / 1000);
+    const now = issuedAt ?? clock;
+    if (!Number.isSafeInteger(now) || now < 0 || now > clock) throw new Error('Event publication timestamps must not be in the future');
     return new SignJWT({ events }).setProtectedHeader({ alg: 'EdDSA', kid: this.config.clientPrivateJwk.kid, typ: 'events+jwt' })
       .setIssuer(this.config.clientId).setSubject(this.config.clientId).setAudience(this.issuer)
       .setIssuedAt(now).setExpirationTime(now + 120).setJti(randomUUID()).sign(await this.key);
@@ -112,8 +114,8 @@ export class OidcClient {
     return payload;
   }
 
-  async publishRoles(payload: unknown): Promise<void> {
-    const eventToken = await this.signEventToken([{ id: randomUUID(), type: 'roles.sync', payload }]);
+  async publishRoles(payload: unknown, issuedAt: number): Promise<void> {
+    const eventToken = await this.signEventToken([{ id: randomUUID(), type: 'roles.sync', payload }], issuedAt);
     const response = await this.fetcher(`${this.internalBase}/backchannel/events`, {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
       headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ event_token: eventToken }),
