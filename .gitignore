@@ -1,0 +1,16 @@
+# Local configuration and generated files
+.local/
+.env
+.env.*
+!.env.example
+
+# Runtime and build output
+node_modules/
+dist/
+build/
+coverage/
+.wrangler/
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
