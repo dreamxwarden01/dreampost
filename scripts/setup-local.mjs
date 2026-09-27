@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
@@ -25,7 +25,7 @@ const lines = [
   `MAIL_STORE_PATH=${JSON.stringify(resolve(directory, 'mail').replaceAll('\\', '/'))}`,
   `INGEST_KEYS_JSON='${JSON.stringify({ 'local-1': ingestSecret })}'`,
   `DEV_VIEW_TOKEN=${viewToken}`,
-  'DEV_MAILBOX_ID=33333333-3333-4333-8333-333333333333',
+  `DEV_MAILBOX_ID=${randomUUID()}`,
   `DEV_MAILBOX_ADDRESS=${address}`,
   'DEV_MAILBOX_NAME="Development inbox"',
 ];
