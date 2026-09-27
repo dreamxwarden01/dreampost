@@ -1,0 +1,11 @@
+# Use a NEW independently generated secret of at least 32 CSPRNG bytes.
+# These example values are not a runnable deployment configuration.
+CONTROL_SECRET="replace-with-a-new-independent-download-machine-secret"
+# Explicit local testing only; production requires distinct HTTPS same-site origins.
+# ALLOW_INSECURE_LOCAL="true"
+# APP_ORIGIN="http://127.0.0.1:5173"
+# DOWNLOAD_ORIGIN="http://127.0.0.1:8788"
+# BACKEND_CONTROL_URL="http://127.0.0.1:3001/internal/v1/attachments/control"
+
+# Optional unit/local-only bypass. Requires ALLOW_INSECURE_LOCAL and all three URL hosts to be localhost/127.0.0.1.
+# ALLOW_LOCAL_RATE_LIMIT_BYPASS="true"

@@ -244,3 +244,5 @@ export function matchesAck(value: unknown, expected: { deliveryId: string; sha25
 export * from './policy.js';
 
 export * from './gateway-operations.js';
+
+export * from './downloads.js';

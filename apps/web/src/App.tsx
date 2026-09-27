@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNod
 import { errorMessage, getMailbox, getMessages, type Mailbox, type MessageSummary } from './api';
 import { SsoWorkspace } from './SsoWorkspace';
 import { MessageReader } from './MessageReader';
+import { clearAttachmentAccessCache, parseAttachmentConfig, type AttachmentConfig } from './attachments/api';
 
 export interface Session {
   token: string;
   mailbox: Mailbox;
+  csrfToken?: string;
 }
 
 type IconName = 'mail' | 'refresh' | 'back' | 'download' | 'disconnect' | 'lock';
@@ -90,7 +92,7 @@ function ConnectionForm({ onConnect }: { onConnect: (session: Session) => void }
   </main>;
 }
 
-export function Inbox({ session, autoLoadExternalImages = false }: { session: Session; autoLoadExternalImages?: boolean }) {
+export function Inbox({ session, autoLoadExternalImages = false, attachmentConfig }: { session: Session; autoLoadExternalImages?: boolean; attachmentConfig?: AttachmentConfig }) {
   const { token, mailbox } = session;
   const [messages, setMessages] = useState<MessageSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -143,20 +145,21 @@ export function Inbox({ session, autoLoadExternalImages = false }: { session: Se
         <div className="message-row message-row-bottom"><Status status={message.status} /><span>{formatBytes(message.sizeBytes)}</span></div>
       </button></li>)}</ul>}
     </section>
-    {selectedId ? <MessageReader key={`${mailbox.id}:${selectedId}`} mailboxId={mailbox.id} token={token} messageId={selectedId} revision={revision} autoLoadExternalImages={autoLoadExternalImages} onBack={() => setSelectedId(null)} /> : <section className="reading-panel empty-reader" aria-label="Message reader"><StatePanel title="A little space for your mail">Select a message to read it and inspect its delivery details.</StatePanel><p className="reader-footnote">Your inbox works independently of AI.</p></section>}
+    {selectedId ? <MessageReader key={`${mailbox.id}:${selectedId}`} mailboxId={mailbox.id} token={token} messageId={selectedId} revision={revision} autoLoadExternalImages={autoLoadExternalImages} csrfToken={session.csrfToken} attachmentConfig={attachmentConfig} onBack={() => setSelectedId(null)} /> : <section className="reading-panel empty-reader" aria-label="Message reader"><StatePanel title="A little space for your mail">Select a message to read it and inspect its delivery details.</StatePanel><p className="reader-footnote">Your inbox works independently of AI.</p></section>}
   </main>;
 }
 
-function DevelopmentApp() {
+function DevelopmentApp({ attachmentConfig }: { attachmentConfig?: AttachmentConfig }) {
   const [session, setSession] = useState<Session | null>(null);
 
   return <div className="app-shell">
-    <header className="app-header"><div className="brand"><span className="brand-symbol"><Icon name="mail" /></span><span>DreamPost</span></div><span className="development-label">Development inbox</span><div className="header-actions">{session ? <><span className="connection-label"><span className="status-dot connected" />Mailbox connected</span><button className="button subtle" onClick={() => setSession(null)} aria-label="Disconnect"><Icon name="disconnect" /><span>Disconnect</span></button></> : <span className="connection-label">Read-only local view</span>}</div></header>
-    {session ? <Inbox session={session} /> : <ConnectionForm onConnect={setSession} />}
+    <header className="app-header"><div className="brand"><span className="brand-symbol"><Icon name="mail" /></span><span>DreamPost</span></div><span className="development-label">Development inbox</span><div className="header-actions">{session ? <><span className="connection-label"><span className="status-dot connected" />Mailbox connected</span><button className="button subtle" onClick={() => { clearAttachmentAccessCache(); setSession(null); }} aria-label="Disconnect"><Icon name="disconnect" /><span>Disconnect</span></button></> : <span className="connection-label">Read-only local view</span>}</div></header>
+    {session ? <Inbox session={session} attachmentConfig={attachmentConfig} /> : <ConnectionForm onConnect={setSession} />}
   </div>;
 }
 
 export function App() {
+  const [attachmentConfig, setAttachmentConfig] = useState<AttachmentConfig | undefined>();
   const [mode, setMode] = useState<'loading' | 'development' | 'sso' | 'error'>('loading');
   useEffect(() => {
     const controller = new AbortController();
@@ -165,11 +168,14 @@ export function App() {
         if (!response.ok) throw new Error('Unavailable');
         const config: unknown = await response.json();
         if (!config || typeof config !== 'object' || !('authentication' in config) || !['development', 'sso'].includes(String(config.authentication))) throw new Error('Invalid configuration');
-        if (!controller.signal.aborted) setMode(config.authentication as 'development' | 'sso');
+        if (!controller.signal.aborted) {
+          const attachments = 'attachments' in config ? parseAttachmentConfig(config.attachments, window.location.origin) : undefined;
+          setAttachmentConfig(attachments); setMode(config.authentication as 'development' | 'sso');
+        }
       }).catch(() => { if (!controller.signal.aborted) setMode('error'); });
     return () => controller.abort();
   }, []);
-  if (mode === 'development') return <DevelopmentApp />;
-  if (mode === 'sso') return <SsoWorkspace />;
+  if (mode === 'development') return <DevelopmentApp attachmentConfig={attachmentConfig} />;
+  if (mode === 'sso') return <SsoWorkspace attachmentConfig={attachmentConfig} />;
   return <main className="connection-page"><section className="connection-card"><h1>DreamPost</h1><p>{mode === 'error' ? 'Cannot reach the mail service. Check the connection and reload.' : 'Connecting to your mail service…'}</p>{mode === 'error' && <button className="button primary" onClick={() => window.location.reload()}>Reload</button>}</section></main>;
 }

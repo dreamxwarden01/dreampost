@@ -1,0 +1,23 @@
+{
+  "name": "@dreampost/downloads",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "dry-run": "wrangler deploy --dry-run --outdir dist",
+    "test:workerd": "pnpm run dry-run && node test/workerd.integration.mjs"
+  },
+  "dependencies": {
+    "@dreampost/protocol": "workspace:*",
+    "tldts": "7.4.15"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260926.1",
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.0",
+    "wrangler": "4.141.0"
+  }
+}

@@ -27,7 +27,11 @@
     "jobs:policies": "node --env-file=.local/dev.env --env-file=.local/sso.env --import tsx apps/api/src/commands/policies.ts",
     "gateway:operator": "node --env-file=.local/dev.env --env-file=.local/gateway-operator.env --import tsx apps/api/src/commands/gateway.ts",
     "reader:reparse": "node --env-file=.local/dev.env --import tsx apps/api/src/commands/reparse-reader.ts",
-    "test:reader:browser": "node --env-file=.local/dev.env --import tsx tests/reader-browser.ts"
+    "test:reader:browser": "node --env-file=.local/dev.env --import tsx tests/reader-browser.ts",
+    "jobs:attachments": "node --env-file=.local/dev.env --env-file-if-exists=.local/sso.env --env-file=.local/attachments.env --import tsx apps/api/src/commands/attachment-jobs.ts",
+    "attachments:backfill": "node --env-file=.local/dev.env --import tsx apps/api/src/commands/backfill-attachments.ts",
+    "test:attachments:browser": "node --env-file=.local/dev.env --import tsx tests/attachments-browser.ts",
+    "setup:attachments": "node scripts/setup-attachments.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

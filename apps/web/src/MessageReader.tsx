@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { AttachmentSection } from './attachments/AttachmentSection';
+import type { AttachmentConfig } from './attachments/api';
 import { errorMessage, getMessage, getRawMessage, getRenderedMessage, type MessageDetail, type RenderedMessage } from './api';
 
 function dateLabel(value: string): string {
@@ -36,9 +38,11 @@ interface ReaderProps {
   revision: number;
   autoLoadExternalImages: boolean;
   onBack: () => void;
+  csrfToken?: string;
+  attachmentConfig?: AttachmentConfig;
 }
 
-export function MessageReader({ mailboxId, token, messageId, revision, autoLoadExternalImages, onBack }: ReaderProps) {
+export function MessageReader({ mailboxId, token, messageId, revision, autoLoadExternalImages, onBack, csrfToken, attachmentConfig }: ReaderProps) {
   const [message, setMessage] = useState<MessageDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -116,6 +120,7 @@ export function MessageReader({ mailboxId, token, messageId, revision, autoLoadE
         {message.to && <p className="recipient-summary" dir="auto">To {message.to}</p>}
         <MessageDetails message={message} />
       </header>
+      {attachmentConfig && <AttachmentSection config={attachmentConfig} access={{ mailboxId, messageId, token, csrfToken }} revision={revision} />}
       {showHtml ? <div className="html-reading-area">
         {renderError ? <div className="reader-failure"><div className="error-panel" role="alert">{renderError}</div><button className="button" onClick={() => setRenderRetry(value => value + 1)}>Try again</button><button className="button subtle" onClick={() => setMode('text')}>Read plain text</button></div> : !visibleRender ? <div className="body-empty" role="status">Preparing message…</div> : <>
           {visibleRender.remoteImageCount > 0 && <div className={`external-images-banner ${imageMode === 'allowed' ? 'images-allowed' : ''}`}>

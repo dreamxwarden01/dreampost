@@ -20,7 +20,7 @@ interface PrincipalRow {
   app_role: number | null; access_enabled: boolean; auth_version: string; revoked_token_iat: string; last_identity_iat: string;
 }
 interface SessionRow {
-  token_hash: string; principal_id: string; sso_sid: string; auth_version: string;
+  session_id: string; idle_expires_at: Date; token_hash: string; principal_id: string; sso_sid: string; auth_version: string;
   csrf_token: string; id_token_hint: string; expires_at: Date; next_activity_at: Date;
 }
 interface FlowRow { verifier: string; nonce: string; return_to: string; }
@@ -137,10 +137,10 @@ export class AuthService {
   }
 
   /** Pass the business transaction client to retain the principal lock through mutation commit. */
-  async resolvePrincipal(principalId: string, client?: PoolClient): Promise<Actor> {
+  async resolvePrincipal(principalId: string, client?: PoolClient, options: { lock?: boolean } = {}): Promise<Actor> {
     const db = client ?? this.pool;
     const { rows } = await db.query<PrincipalRow>(
-      `SELECT p.* FROM principals p WHERE p.id = $1 AND p.issuer = $2${client ? ' FOR UPDATE' : ''}`,
+      `SELECT p.* FROM principals p WHERE p.id = $1 AND p.issuer = $2${client && options.lock !== false ? ' FOR UPDATE' : ''}`,
       [principalId, this.oidc.issuer],
     );
     const principal = rows[0];
@@ -164,15 +164,37 @@ export class AuthService {
   private async session(request: FastifyRequest, client?: PoolClient): Promise<SessionRow> {
     const token = readCookies(request.headers.cookie)[this.sessionCookieName];
     if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new ApiError(401, 'authentication_required');
+    return this.lookupSession('token_hash', hashSecret(token), client);
+  }
+
+  private async lookupSession(column: 'token_hash' | 'session_id', value: string, client?: PoolClient): Promise<SessionRow> {
     const { rows } = await (client ?? this.pool).query<SessionRow>(
       `SELECT s.* FROM auth_sessions s JOIN principals p ON p.id = s.principal_id
-       WHERE s.token_hash = $1 AND p.issuer = $2 AND s.client_id = $4 AND p.access_enabled AND s.auth_version = p.auth_version
+       WHERE s.${column} = $1 AND p.issuer = $2 AND s.client_id = $4 AND p.access_enabled AND s.auth_version = p.auth_version
          AND s.expires_at > $3 AND s.idle_expires_at > $3
          AND NOT EXISTS (SELECT 1 FROM auth_revoked_sids r WHERE r.issuer = p.issuer AND r.sid = s.sso_sid)`,
-      [hashSecret(token), this.oidc.issuer, new Date(this.now()), this.config.clientId],
+      [value, this.oidc.issuer, new Date(this.now()), this.config.clientId],
     );
     if (!rows[0]) throw new ApiError(401, 'authentication_required');
     return rows[0];
+  }
+
+  /** Capture only a durable reference; never give the download service an SSO cookie. */
+  async downloadSource(request: FastifyRequest): Promise<{ sessionId: string; principalId: string; expiresAt: number }> {
+    const row = await this.session(request);
+    return { sessionId: row.session_id, principalId: row.principal_id,
+      expiresAt: Math.min(row.expires_at.getTime(), row.idle_expires_at.getTime()) };
+  }
+
+  /** Read-only admission must not keep a source login alive through download traffic. */
+  async authorizeSessionReference(sessionId: string, principalId: string, client?: PoolClient): Promise<{ actor: Actor; expiresAt: number }> {
+    const first = await this.lookupSession('session_id', sessionId, client);
+    if (first.principal_id !== principalId) throw new ApiError(401, 'authentication_required');
+    // Read-only MVCC checks avoid acquiring a principal lock after a download-session lock.
+    const actor = await this.resolvePrincipal(principalId, client, { lock: false });
+    const current = await this.lookupSession('session_id', sessionId, client);
+    if (current.principal_id !== principalId || current.auth_version !== first.auth_version) throw new ApiError(401, 'authentication_required');
+    return { actor, expiresAt: Math.min(current.expires_at.getTime(), current.idle_expires_at.getTime()) };
   }
 
   async authorizeRequest(request: FastifyRequest, options: { mutating?: boolean; client?: PoolClient } = {}): Promise<Actor> {

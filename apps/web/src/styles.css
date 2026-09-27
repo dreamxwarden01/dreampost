@@ -238,3 +238,56 @@ button { color: inherit; }
   .message-details-popover dl > div { grid-template-columns: 80px minmax(0, 1fr); gap: 9px; }
   .message-html-frame { height: max(400px, 60vh); }
 }
+
+.attachments-section { padding: 20px 30px; border-bottom: 1px solid var(--border); }
+.attachments-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.attachments-heading h2 { font-size: 12px; font-weight: 600; margin: 0; }
+.attachments-heading > span { font-size: 10px; color: var(--muted); }
+.attachment-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+.attachment-card { display: flex; align-items: center; gap: 11px; min-width: 0; padding: 12px; border: 1px solid #e4e9f0; border-radius: 8px; background: #fafbfd; }
+.attachment-symbol { width: 34px; height: 39px; display: grid; place-items: center; flex-shrink: 0; background: #eaf0f8; border-radius: 5px; color: #557296; font-size: 9px; font-weight: 700; }
+.attachment-symbol.pdf-symbol { background: #fcecec; color: #b05a5a; }
+.attachment-description { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.attachment-description strong { font-weight: 550; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-description > span { font-size: 10px; color: var(--muted); }
+.attachment-actions { display: flex; gap: 5px; flex-shrink: 0; }
+.attachment-actions .button { font-size: 10px; min-height: 30px; padding: 6px 8px; }
+.attachment-status, .attachment-download-ready { color: #748095; font-size: 11px; line-height: 1.7; margin: 9px 0; }
+.attachment-download-ready a { color: var(--blue); overflow-wrap: anywhere; }
+.attachment-preview-dialog { width: min(1280px, calc(100vw - 40px)); max-width: none; height: calc(100dvh - 40px); max-height: none; margin: auto; padding: 0; border: 1px solid #d9e0ea; border-radius: 12px; background: #f0f2f6; color: #263245; box-shadow: 0 25px 100px #152a4a44; overflow: hidden; }
+.attachment-preview-dialog[open] { display: flex; flex-direction: column; }
+.attachment-preview-dialog::backdrop { background: #14243a9c; backdrop-filter: blur(2px); }
+.attachment-preview-heading { display: flex; gap: 20px; align-items: center; justify-content: space-between; padding: 15px 20px; background: #fff; border-bottom: 1px solid var(--border); }
+.attachment-preview-heading > div:first-child { min-width: 0; }
+.attachment-preview-heading p { margin: 0 0 5px; font-size: 10px; color: var(--muted); }
+.attachment-preview-heading strong { display: block; max-width: 70vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.attachment-preview-actions { display: flex; align-items: center; gap: 12px; }
+.attachment-preview-actions .icon-button { font-size: 22px; }
+.attachment-preview-tools { display: flex; gap: 6px; align-items: center; justify-content: center; padding: 7px 14px; background: #fff; border-bottom: 1px solid var(--border); font-size: 11px; }
+.preview-zoom { display: flex; align-items: center; gap: 5px; margin-left: 12px; }
+.attachment-preview-frame { border: 0; width: 100%; flex: 1; min-height: 0; background: #edf0f5; }
+.attachment-preview-loading { padding: 12px 20px; color: #697a91; text-align: center; font-size: 12px; }
+.attachment-preview-error { margin: auto; padding: 35px; max-width: 460px; text-align: center; font-size: 13px; line-height: 1.8; }
+@media (max-width: 700px) {
+  .attachments-section { padding: 18px 20px; }
+  .attachment-card { flex-wrap: wrap; }
+  .attachment-actions { width: 100%; justify-content: end; }
+  .attachment-preview-dialog { width: 100vw; height: 100dvh; border: 0; border-radius: 0; }
+  .attachment-preview-heading { padding: 13px; gap: 10px; }
+  .attachment-preview-heading strong { max-width: 55vw; }
+  .attachment-preview-actions { gap: 4px; }
+  .attachment-preview-actions .button { font-size: 10px; padding: 6px; }
+  .attachment-preview-tools { gap: 0; padding: 5px; }
+  .preview-zoom { margin-left: 4px; gap: 1px; }
+  .attachment-preview-tools .button { padding: 6px; font-size: 10px; }
+}
+
+.attachment-navigation { display: flex; gap: 4px; }
+.attachment-navigation .icon-button { font-size: 16px; width: 30px; height: 32px; }
+@media (max-width: 700px) {
+  .attachment-preview-heading strong { max-width: 42vw; }
+  .attachment-navigation .icon-button { width: 26px; }
+}
+
+.preview-download-notice { padding: 10px 20px; margin: 0; font-size: 11px; line-height: 1.6; background: #f5f8fc; color: #63748a; }
+.preview-download-notice a { color: var(--blue); }

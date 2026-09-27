@@ -15,6 +15,7 @@ import { getReaderData, readerSummary } from './reader-data.js';
 import { registerReaderPreferenceRoutes } from './reader-preferences.js';
 import { renderHtmlIsolated } from './html-reader.js';
 import type { DeliveryMetadata } from '@dreampost/protocol';
+import { registerDownloadControl, registerAttachmentRoutes } from './downloads/http.js';
 
 interface MessageRow {
   id: string;
@@ -66,9 +67,10 @@ export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBl
       registerAddressRoutes(app, addresses, request => auth!.authorizeRequest(request, { mutating: !['GET', 'HEAD', 'OPTIONS'].includes(request.method) }));
     }
   }
+  const downloads = registerDownloadControl(app, config, pool, auth);
   app.get('/api/config', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store');
-    return { authentication: auth ? 'sso' : 'development' };
+    return { authentication: auth ? 'sso' : 'development', ...(config.downloads ? { attachments: { downloadOrigin: config.downloads.origin, previewOrigin: config.downloads.previewOrigin, maxPreviewBytes: config.downloads.maxPreviewBytes } } : {}) };
   });
   app.get('/healthz', async () => ({ status: 'ok' }));
   app.get('/readyz', async (_request, reply) => {
@@ -88,7 +90,7 @@ export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBl
     if (!Buffer.isBuffer(request.body)) throw new ApiError(415, 'unsupported_content_type');
     try { await verifyDeliveryBody(request.body, verified); }
     catch { throw new ApiError(400, 'delivery_body_mismatch'); }
-    return ingest(pool, blobs, verified, request.body);
+    return ingest(pool, blobs, verified, request.body, { attachments: !!config.downloads });
   });
 
   void app.register(async (api) => {
@@ -131,6 +133,7 @@ export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBl
       return rows[0];
     }
 
+    if (downloads) registerAttachmentRoutes(api, pool, downloads, getMessage);
     api.get('/mailboxes', async (request) => {
       if (auth) {
         const actor = actors.get(request)!;

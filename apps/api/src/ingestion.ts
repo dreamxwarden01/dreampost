@@ -4,6 +4,7 @@ import { normalizeRecipientAddress, type DeliveryAck, type DeliveryMetadata, typ
 import type { RawBlobStore } from './blob-store.js';
 import { appendChange } from './database.js';
 import { ApiError } from './errors.js';
+import { enqueueAttachmentExtraction } from './attachments/service.js';
 
 interface StoredDelivery { metadata: DeliveryMetadata; sha256: string; }
 
@@ -23,7 +24,7 @@ const existingDelivery = 'SELECT metadata, sha256 FROM deliveries WHERE id = $1'
 const configuredRoute = `SELECT m.id FROM mailboxes m JOIN recipient_routes r ON r.mailbox_id = m.id
   WHERE m.id = $1 AND lower(r.address) = $2 AND m.enabled AND r.enabled`;
 
-export async function ingest(pool: Pool, blobs: RawBlobStore, verified: VerifiedDelivery, raw: Uint8Array): Promise<DeliveryAck> {
+export async function ingest(pool: Pool, blobs: RawBlobStore, verified: VerifiedDelivery, raw: Uint8Array, options: { attachments?: boolean } = {}): Promise<DeliveryAck> {
   const { metadata, sha256 } = verified;
   const recipient = normalizeRecipientAddress(metadata.envelopeTo);
   const historyRoute = `SELECT m.id FROM mailboxes m JOIN address_policy_history p ON p.mailbox_id = m.id
@@ -91,6 +92,7 @@ export async function ingest(pool: Pool, blobs: RawBlobStore, verified: Verified
       assertSame(raced.rows[0]!, verified);
     } else {
       await client.query('INSERT INTO durable_jobs (id, delivery_id, kind) VALUES ($1, $2, $3)', [randomUUID(), metadata.deliveryId, 'parse']);
+      if (options.attachments) await enqueueAttachmentExtraction(client, metadata.deliveryId);
       await appendChange(client, metadata.mailboxId, metadata.deliveryId, 'message.received');
     }
     await client.query('COMMIT');

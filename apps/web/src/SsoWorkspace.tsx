@@ -3,6 +3,7 @@ import { Inbox } from './App';
 import { errorMessage, getMailboxes, getReadingPreferences, sessionRequest, type Mailbox, type ReadingPreferences } from './api';
 import { AddressSettings } from './AddressSettings';
 import { ReadingSettings } from './ReadingSettings';
+import { clearAttachmentAccessCache, type AttachmentConfig } from './attachments/api';
 
 export interface UserSession {
   actor: { principalId: string; username: string; roleId: number; permissions: string[] } | null;
@@ -12,7 +13,7 @@ export interface UserSession {
   catalog: { configured?: boolean; syncedAt: string | null };
 }
 
-export function SsoWorkspace() {
+export function SsoWorkspace({ attachmentConfig }: { attachmentConfig?: AttachmentConfig }) {
   const [session, setSession] = useState<UserSession | null>(null);
   const [mailboxes, setMailboxes] = useState<Mailbox[]>([]);
   const [selected, setSelected] = useState('');
@@ -57,11 +58,13 @@ export function SsoWorkspace() {
       const principalId = current.actor?.principalId ?? null;
       if (preferencePrincipal.current !== principalId) {
         preferenceController.current?.abort(); setPreferences(null); setPreferenceError('');
+        if (preferencePrincipal.current !== null) clearAttachmentAccessCache();
         setMailboxes([]); setSelected('');
         preferencePrincipal.current = principalId;
       }
       setSession(current);
       if (!current.actor) {
+        clearAttachmentAccessCache();
         setMailboxes([]); setSelected(''); setError('');
         if (current.catalog.syncedAt && !navigating.current) {
           navigating.current = true;
@@ -96,7 +99,7 @@ export function SsoWorkspace() {
       const result = await sessionRequest<{ logoutUrl: string }>('/auth/logout', { method: 'POST', csrfToken: session.csrfToken });
       navigating.current = true; setRedirecting(true);
       reloadController.current?.abort(); preferenceController.current?.abort(); preferencePrincipal.current = null;
-      setSession(null); setMailboxes([]); setSelected(''); setPreferences(null);
+      setSession(null); setMailboxes([]); setSelected(''); setPreferences(null); clearAttachmentAccessCache();
       window.location.assign(result.logoutUrl);
     } catch (failure) { navigating.current = false; setRedirecting(false); setError(errorMessage(failure)); }
   }
@@ -112,6 +115,6 @@ export function SsoWorkspace() {
       <div className="profile-entry" ref={profileRef}><button className="profile-button" aria-label="Account menu" aria-expanded={profileOpen} onClick={() => setProfileOpen(value => !value)}>{name.slice(0, 1).toUpperCase()}</button>{profileOpen && <div className="profile-popover" onKeyDown={event => { if (event.key === 'Escape') setProfileOpen(false); }}><strong>{name}</strong>{session.profile?.email && <span>{session.profile.email}</span>}{accountUrl && <a href={accountUrl} target="_blank" rel="noreferrer">View account</a>}<button className="button subtle" onClick={() => { setView('reading'); setProfileOpen(false); }}>Reading settings</button><button className="button subtle" onClick={() => void logout()}>Sign out</button></div>}</div>
     </div></header>
     {error && <div className="error-panel" role="alert">{error}<button className="text-button" onClick={() => void reload()}>Refresh session</button></div>}
-    {view === 'reading' ? <ReadingSettings key={session.actor.principalId} preferences={preferences} csrfToken={session.csrfToken ?? ''} error={preferenceError} onReload={() => void reloadPreferences(session.actor!.principalId)} onChanged={value => { preferenceController.current?.abort(); setPreferences(value); setPreferenceError(''); }} /> : view === 'addresses' ? <AddressSettings session={session} onChanged={() => void reload()} /> : mailbox ? <Inbox key={`${session.actor.principalId}:${mailbox.id}`} session={{ token: '', mailbox }} autoLoadExternalImages={preferences?.autoLoadExternalImages ?? false} /> : <main className="settings-page"><h1>Your mailbox</h1><p>No mailbox is available yet. Open Addresses to review your access or request an address.</p><button className="button primary" onClick={() => setView('addresses')}>Manage addresses</button></main>}
+    {view === 'reading' ? <ReadingSettings key={session.actor.principalId} preferences={preferences} csrfToken={session.csrfToken ?? ''} error={preferenceError} onReload={() => void reloadPreferences(session.actor!.principalId)} onChanged={value => { preferenceController.current?.abort(); setPreferences(value); setPreferenceError(''); }} /> : view === 'addresses' ? <AddressSettings session={session} onChanged={() => void reload()} /> : mailbox ? <Inbox key={`${session.actor.principalId}:${mailbox.id}`} session={{ token: '', mailbox, csrfToken: session.csrfToken ?? undefined }} attachmentConfig={attachmentConfig} autoLoadExternalImages={preferences?.autoLoadExternalImages ?? false} /> : <main className="settings-page"><h1>Your mailbox</h1><p>No mailbox is available yet. Open Addresses to review your access or request an address.</p><button className="button primary" onClick={() => setView('addresses')}>Manage addresses</button></main>}
   </div>;
 }
