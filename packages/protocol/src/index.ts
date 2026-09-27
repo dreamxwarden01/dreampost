@@ -1,5 +1,4 @@
 export const MAX_INBOUND_BYTES = 25 * 1024 * 1024;
-export const CLOUDFLARE_OUTBOUND_MAX_BYTES = 5 * 1024 * 1024;
 export const INGEST_PATH = '/internal/v1/deliveries';
 
 interface DeliveryMetadataBase {
@@ -50,6 +49,7 @@ export interface BlobStore {
 }
 
 export interface TransportCapabilities {
+  /** Resolved provider/route configuration for the complete encoded MIME message. */
   maxMessageBytes: number;
   maxRecipients: number;
   supportsIdempotencyKey: boolean;
