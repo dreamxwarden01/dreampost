@@ -198,3 +198,43 @@ button { color: inherit; }
 
 .admin-address-form select { display: block; width: 100%; padding: 10px; margin-bottom: 14px; border: 1px solid #cdd6e2; border-radius: 7px; background: white; }
 .admin-address-list .row-actions { flex-wrap: wrap; justify-content: end; }
+
+.reader-mode-toggle { display: inline-flex; gap: 2px; padding: 3px; background: #f0f3f8; border-radius: 7px; }
+.reader-mode-toggle button { border: 0; background: transparent; padding: 6px 10px; border-radius: 4px; font-size: 11px; white-space: nowrap; color: #67758b; }
+.reader-mode-toggle button[aria-pressed="true"] { background: #fff; color: #2f5fb8; box-shadow: 0 1px 3px #203b6517; }
+.sender-summary { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; font-size: 12px; }
+.sender-summary strong { overflow-wrap: anywhere; min-width: 0; font-weight: 600; }
+.sender-summary time { flex-shrink: 0; font-size: 10px; color: #8490a2; }
+.recipient-summary { margin: 9px 0 0; color: #79869a; font-size: 11px; overflow-wrap: anywhere; }
+.message-details { position: relative; margin-top: 10px; }
+.details-button { display: inline-flex; align-items: center; gap: 7px; border: 0; background: transparent; color: #647894; padding: 5px 0; font-size: 11px; }
+.details-button:hover { color: #2c5bb5; }
+.message-details-popover { position: absolute; top: 32px; left: 0; z-index: 10; width: min(520px, 100%); min-width: min(300px, 100%); max-height: 55vh; overflow: auto; padding: 20px; border: 1px solid #e0e6ef; border-radius: 9px; background: #fff; box-shadow: 0 8px 32px #1e35501f; }
+.message-details-popover dl { display: grid; gap: 11px; margin: 0; font-size: 11px; line-height: 1.65; }
+.message-details-popover dl > div { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px; }
+.message-details-popover dt { color: #7d899a; }
+.message-details-popover dd { margin: 0; color: #3c4c63; overflow-wrap: anywhere; }
+.external-images-banner { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px 24px; background: #f1f5fc; border-bottom: 1px solid #e0e8f5; font-size: 11px; color: #536b8e; }
+.external-images-banner strong { font-weight: 600; }
+.external-images-banner p { margin: 5px 0 0; line-height: 1.65; }
+.external-images-banner .button { flex-shrink: 0; }
+.external-images-banner.images-allowed { background: #f7f8fa; color: #718097; border-color: #e9edf2; }
+.render-notice { padding: 12px 24px; color: #7c6a43; background: #fffbf2; font-size: 11px; line-height: 1.65; }
+.render-notice p { margin: 0; }
+.render-notice p + p { margin-top: 5px; }
+.message-html-frame { display: block; border: 0; width: 100%; height: max(420px, 62vh); background: #fff; }
+.preference-toggle { display: flex; align-items: center; gap: 12px; cursor: pointer; font-size: 14px; font-weight: 550; }
+.preference-toggle input { width: 18px; height: 18px; accent-color: var(--blue); flex-shrink: 0; }
+.preference-description, .preference-disclosure { font-size: 13px; line-height: 1.8; max-width: 650px; }
+.preference-disclosure { padding: 14px 16px; border-radius: 7px; background: #f3f6fa; }
+.preference-status { min-height: 18px; font-size: 12px; }
+@media (max-width: 1100px) { .sender-summary { flex-direction: column; gap: 8px; } }
+@media (max-width: 700px) {
+  .reader-toolbar { flex-wrap: wrap; }
+  .reader-toolbar .download-button { font-size: 10px; padding-left: 5px; padding-right: 5px; }
+  .reader-mode-toggle button { padding: 6px 8px; }
+  .external-images-banner { padding: 15px 20px; align-items: flex-start; flex-direction: column; gap: 10px; }
+  .message-details-popover { padding: 16px; }
+  .message-details-popover dl > div { grid-template-columns: 80px minmax(0, 1fr); gap: 9px; }
+  .message-html-frame { height: max(400px, 60vh); }
+}

@@ -11,6 +11,10 @@ import { ingest } from './ingestion.js';
 import { ApiError } from './errors.js';
 import { registerAuthRoutes, type Actor, type AuthService } from './auth/index.js';
 import { AddressService, registerAddressRoutes } from './addresses/index.js';
+import { getReaderData, readerSummary } from './reader-data.js';
+import { registerReaderPreferenceRoutes } from './reader-preferences.js';
+import { renderHtmlIsolated } from './html-reader.js';
+import type { DeliveryMetadata } from '@dreampost/protocol';
 
 interface MessageRow {
   id: string;
@@ -23,6 +27,7 @@ interface MessageRow {
   parse_status: string;
   raw_size: number;
   sha256: string;
+  metadata: DeliveryMetadata;
 }
 
 export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBlobStore; logger?: boolean; authFetch?: typeof fetch } = {}) {
@@ -55,6 +60,7 @@ export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBl
       try { await addresses?.provisionFirstMailbox(actor.principalId); }
       catch { app.log.warn({ event: 'mailbox_provisioning_deferred' }, 'Mailbox provisioning will retry on the addresses page'); }
     } });
+    registerReaderPreferenceRoutes(app, pool, auth);
     if (config.addresses) {
       addresses = new AddressService(pool, config.addresses, (id, client) => auth!.resolvePrincipal(id, client));
       registerAddressRoutes(app, addresses, request => auth!.authorizeRequest(request, { mutating: !['GET', 'HEAD', 'OPTIONS'].includes(request.method) }));
@@ -154,10 +160,36 @@ export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBl
     });
     api.get<{ Params: { id: string; messageId: string } }>('/mailboxes/:id/messages/:messageId', async (request) => {
       const row = await getMessage(request, request.params.id, request.params.messageId);
+      const reader = await getReaderData(pool, row.id);
       return { message: {
         id: row.id, subject: row.subject, from: row.from_header, to: row.to_header,
         receivedAt: row.received_at.toISOString(), text: row.plain_text, status: row.parse_status, sizeBytes: row.raw_size,
+        reader: { ...readerSummary(reader, row.metadata), contentVersion: `${row.sha256}:${reader?.parserVersion ?? 0}:html-render-policy-1` },
       } };
+    });
+    api.get<{ Params: { id: string; messageId: string }; Querystring: { remoteImages?: string } }>('/mailboxes/:id/messages/:messageId/render', async (request, reply) => {
+      const row = await getMessage(request, request.params.id, request.params.messageId);
+      const keys = Object.keys(request.query);
+      if (keys.some(key => key !== 'remoteImages') || (request.query.remoteImages !== undefined && !['blocked', 'allowed'].includes(request.query.remoteImages))) {
+        throw new ApiError(400, 'invalid_image_mode');
+      }
+      const data = await getReaderData(pool, row.id);
+      if (!data?.htmlSource) throw new ApiError(404, 'html_unavailable');
+      const cancelled = new AbortController();
+      const onClosed = () => { if (!reply.raw.writableFinished) cancelled.abort(); };
+      reply.raw.once('close', onClosed);
+      let rendered;
+      try {
+        rendered = await renderHtmlIsolated({ html: data.htmlSource, inlineCandidates: data.inlineCandidates,
+          remoteImages: request.query.remoteImages === 'allowed' ? 'allowed' : 'blocked', blockedOrigins: [config.publicBaseUrl] },
+        { principalKey: auth ? actors.get(request)!.principalId : `development:${config.devMailboxId}`, signal: cancelled.signal });
+      } finally { reply.raw.removeListener('close', onClosed); }
+      // Rendering is isolated and may take time. Recheck session and current mailbox access before returning content.
+      if (auth) actors.set(request, await auth.authorizeRequest(request));
+      await authorizeMailbox(request, request.params.id);
+      reply.header('X-Content-Type-Options', 'nosniff');
+      reply.header('X-DNS-Prefetch-Control', 'off');
+      return rendered;
     });
     api.get<{ Params: { id: string; messageId: string } }>('/mailboxes/:id/messages/:messageId/raw', async (request, reply) => {
       const row = await getMessage(request, request.params.id, request.params.messageId);

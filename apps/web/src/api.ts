@@ -17,6 +17,25 @@ export interface MessageSummary {
 
 export interface MessageDetail extends Omit<MessageSummary, 'preview'> {
   text: string;
+  reader: {
+    hasHtml: boolean;
+    contentVersion: string;
+    replyTo: string;
+    cc: string;
+    sentAt: string | null;
+    envelopeFrom: string;
+    envelopeTo: string;
+  };
+}
+
+export interface RenderedMessage {
+  html: string;
+  remoteImageCount: number;
+  warnings: string[];
+}
+
+export interface ReadingPreferences {
+  autoLoadExternalImages: boolean;
 }
 
 export class ApiError extends Error {
@@ -118,7 +137,16 @@ export async function getMessages(mailboxId: string, token: string, signal: Abor
 export async function getMessage(mailboxId: string, messageId: string, token: string, signal: AbortSignal): Promise<MessageDetail> {
   const path = `${mailboxPath(mailboxId)}/${encodeURIComponent(messageId)}`;
   const data = await json(await request(path, token, signal));
-  const message = { ...messageFields(data.message), text: string(record(data.message).text) };
+  const detail = record(data.message);
+  const reader = record(detail.reader);
+  if (typeof reader.hasHtml !== 'boolean' || (reader.sentAt !== null && typeof reader.sentAt !== 'string')) return invalidResponse();
+  const message: MessageDetail = {
+    ...messageFields(data.message), text: string(detail.text),
+    reader: {
+      hasHtml: reader.hasHtml, contentVersion: string(reader.contentVersion), replyTo: string(reader.replyTo), cc: string(reader.cc),
+      sentAt: reader.sentAt, envelopeFrom: string(reader.envelopeFrom), envelopeTo: string(reader.envelopeTo),
+    },
+  };
   if (message.id !== messageId) return invalidResponse();
   return message;
 }
@@ -170,4 +198,27 @@ export async function sessionRequest<T>(path: string, options: { method?: string
   }
   if (response.status === 204) return undefined as T;
   return await response.json() as T;
+}
+
+export async function getRenderedMessage(mailboxId: string, messageId: string, token: string, remoteImages: 'blocked' | 'allowed', signal: AbortSignal): Promise<RenderedMessage> {
+  const path = `${mailboxPath(mailboxId)}/${encodeURIComponent(messageId)}/render?remoteImages=${remoteImages}`;
+  const data = await json(await request(path, token, signal));
+  if (typeof data.remoteImageCount !== 'number' || !Number.isSafeInteger(data.remoteImageCount) || data.remoteImageCount < 0) return invalidResponse();
+  return { html: string(data.html), remoteImageCount: data.remoteImageCount, warnings: list(data.warnings).map(string) };
+}
+
+function readingPreferences(value: unknown): ReadingPreferences {
+  const data = record(value);
+  if (typeof data.autoLoadExternalImages !== 'boolean') return invalidResponse();
+  return { autoLoadExternalImages: data.autoLoadExternalImages };
+}
+
+export async function getReadingPreferences(signal: AbortSignal): Promise<ReadingPreferences> {
+  return readingPreferences(await sessionRequest<unknown>('/api/preferences', { signal }));
+}
+
+export async function updateReadingPreferences(preferences: ReadingPreferences, csrfToken: string, signal: AbortSignal): Promise<ReadingPreferences> {
+  return readingPreferences(await sessionRequest<unknown>('/api/preferences', {
+    method: 'PATCH', body: preferences, csrfToken, signal,
+  }));
 }

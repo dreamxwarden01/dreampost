@@ -1,4 +1,4 @@
-import PostalMime from 'postal-mime';
+import { parseMimeIsolated, ReaderParseError, READER_PARSER_VERSION, storeReaderData, type ParsedReaderMessage } from './reader-data.js';
 import type { Pool } from 'pg';
 import type { RawBlobStore } from './blob-store.js';
 import { appendChange } from './database.js';
@@ -21,10 +21,12 @@ export async function runOneParseJob(pool: Pool, blobs: RawBlobStore): Promise<b
     const result = await client.query<MessageRow>('SELECT mailbox_id, sha256 FROM deliveries WHERE id = $1', [job.delivery_id]);
     const message = result.rows[0];
     if (!message) throw new Error('delivery_missing');
-    let parsed: Awaited<ReturnType<typeof PostalMime.parse>> | undefined;
+    // Persist attempts, including failures, so bounded backfills advance past permanent failures.
+    await client.query('UPDATE durable_jobs SET parser_version_attempted = GREATEST(parser_version_attempted,$2) WHERE id = $1', [job.id, READER_PARSER_VERSION]);
+    let parsed: ParsedReaderMessage | undefined;
     let failure: string | undefined;
-    try { parsed = await PostalMime.parse(await blobs.get(message.sha256)); }
-    catch { failure = 'raw_read_or_parse_failed'; }
+    try { parsed = await parseMimeIsolated(await blobs.get(message.sha256)); }
+    catch (error) { failure = error instanceof ReaderParseError ? error.code : 'raw_read_or_parse_failed'; }
     if (failure || !parsed) {
       const exhausted = job.attempts + 1 >= 5;
       await client.query(
@@ -37,17 +39,13 @@ export async function runOneParseJob(pool: Pool, blobs: RawBlobStore): Promise<b
         await client.query("UPDATE deliveries SET parse_status = 'failed' WHERE id = $1", [job.delivery_id]);
       }
     } else {
-      const formatAddress = (address: { name?: string; address?: string }): string =>
-        address.name && address.address ? `${address.name} <${address.address}>` : address.address ?? address.name ?? '';
-      const clean = (value: string): string => value.replace(/\u0000/g, '\uFFFD');
-      const text = clean(parsed.text ?? (parsed.html ? 'This message has no plain-text part. Download the raw message to inspect its HTML content.' : ''));
       await appendChange(client, message.mailbox_id, job.delivery_id, 'message.parsed');
       await client.query(
         `UPDATE deliveries SET parse_status = 'parsed', subject = $2, from_header = $3,
          to_header = $4, plain_text = $5, preview = $6 WHERE id = $1`,
-        [job.delivery_id, clean(parsed.subject ?? ''), clean(parsed.from ? formatAddress(parsed.from) : ''),
-          clean((parsed.to ?? []).map(formatAddress).join(', ')), text, text.replace(/\s+/g, ' ').trim().slice(0, 200)],
+        [job.delivery_id, parsed.subject, parsed.from, parsed.to, parsed.text, parsed.preview],
       );
+      await storeReaderData(client, job.delivery_id, parsed.reader);
       await client.query(
         "UPDATE durable_jobs SET status = 'done', attempts = attempts + 1, last_error_code = NULL, completed_at = now() WHERE id = $1",
         [job.id],

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { errorMessage, getMailbox, getMessage, getMessages, getRawMessage, type Mailbox, type MessageDetail, type MessageSummary } from './api';
+import { errorMessage, getMailbox, getMessages, type Mailbox, type MessageSummary } from './api';
 import { SsoWorkspace } from './SsoWorkspace';
+import { MessageReader } from './MessageReader';
 
 export interface Session {
   token: string;
@@ -89,86 +90,8 @@ function ConnectionForm({ onConnect }: { onConnect: (session: Session) => void }
   </main>;
 }
 
-function MessageReader({ session, messageId, revision, onBack }: { session: Session; messageId: string; revision: number; onBack: () => void }) {
-  const [message, setMessage] = useState<MessageDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
-  const [retry, setRetry] = useState(0);
-  const rawController = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    setMessage(null);
-    getMessage(session.mailbox.id, messageId, session.token, controller.signal)
-      .then((data) => { if (!controller.signal.aborted) setMessage(data); })
-      .catch((failure: unknown) => { if (!controller.signal.aborted) setError(errorMessage(failure)); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
-  }, [session, messageId, revision, retry]);
-
-  useEffect(() => {
-    setDownloading(false);
-    setDownloadError(null);
-    return () => rawController.current?.abort();
-  }, [messageId]);
-
-  async function downloadRaw() {
-    rawController.current?.abort();
-    const controller = new AbortController();
-    rawController.current = controller;
-    setDownloading(true);
-    setDownloadError(null);
-    try {
-      const blob = await getRawMessage(session.mailbox.id, messageId, session.token, controller.signal);
-      if (controller.signal.aborted) return;
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${messageId.replace(/[^a-zA-Z0-9-]/g, '_')}.eml`;
-      document.body.append(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (failure) {
-      if (!controller.signal.aborted) setDownloadError(errorMessage(failure));
-    } finally {
-      if (!controller.signal.aborted) setDownloading(false);
-    }
-  }
-
-  return <section className="reading-panel" aria-label="Message reader" aria-busy={loading}>
-    <div className="reader-toolbar">
-      <button className="button subtle back-button" onClick={onBack}><Icon name="back" /><span>Inbox</span></button>
-      <span className="reader-mode">Plain text</span>
-      <button className="button subtle download-button" onClick={downloadRaw} disabled={downloading}><Icon name="download" /><span>{downloading ? 'Downloading…' : 'Download original'}</span></button>
-    </div>
-    {downloadError && <div className="reader-error error-panel" role="alert">{downloadError}</div>}
-    {loading ? <StatePanel title="Loading message" busy /> : error ? <div className="reader-failure">
-      <div className="error-panel" role="alert">{error}</div>
-      <button className="button" onClick={() => setRetry((value) => value + 1)}>Try again</button>
-    </div> : message && <article className="message-content">
-      <header className="message-header">
-        <div className="message-heading-meta"><Status status={message.status} /><span>{formatBytes(message.sizeBytes)}</span></div>
-        <h1>{message.subject || '(No subject)'}</h1>
-        <dl className="message-addresses">
-          <div><dt>From</dt><dd dir="auto">{message.from || '(Sender unavailable)'}</dd></div>
-          <div><dt>To</dt><dd dir="auto">{message.to || '(Not specified)'}</dd></div>
-          <div><dt>Received</dt><dd><time dateTime={message.receivedAt}>{formatDate(message.receivedAt, true)}</time></dd></div>
-        </dl>
-      </header>
-      {message.text ? <div className="message-body" dir="auto">{message.text}</div> : <div className="body-empty">
-        <p>No plain-text body is available.</p>
-        <p>The message may still be waiting for parsing, contain only HTML, or have no readable body. Check its status or download the original message.</p>
-      </div>}
-    </article>}
-  </section>;
-}
-
-export function Inbox({ session }: { session: Session }) {
+export function Inbox({ session, autoLoadExternalImages = false }: { session: Session; autoLoadExternalImages?: boolean }) {
+  const { token, mailbox } = session;
   const [messages, setMessages] = useState<MessageSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -184,7 +107,7 @@ export function Inbox({ session }: { session: Session }) {
     setLoading(true);
     setError(null);
     try {
-      const items = await getMessages(session.mailbox.id, session.token, controller.signal);
+      const items = await getMessages(mailbox.id, token, controller.signal);
       if (controller.signal.aborted) return;
       setMessages(items);
       setSelectedId((current) => items.some((item) => item.id === current) ? current : null);
@@ -195,7 +118,7 @@ export function Inbox({ session }: { session: Session }) {
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }, [session]);
+  }, [mailbox.id, token]);
 
   useEffect(() => {
     void refresh();
@@ -220,7 +143,7 @@ export function Inbox({ session }: { session: Session }) {
         <div className="message-row message-row-bottom"><Status status={message.status} /><span>{formatBytes(message.sizeBytes)}</span></div>
       </button></li>)}</ul>}
     </section>
-    {selectedId ? <MessageReader session={session} messageId={selectedId} revision={revision} onBack={() => setSelectedId(null)} /> : <section className="reading-panel empty-reader" aria-label="Message reader"><StatePanel title="A little space for your mail">Select a message to read its plain-text content and inspect the original delivery.</StatePanel><p className="reader-footnote">Your inbox works independently of AI.</p></section>}
+    {selectedId ? <MessageReader key={`${mailbox.id}:${selectedId}`} mailboxId={mailbox.id} token={token} messageId={selectedId} revision={revision} autoLoadExternalImages={autoLoadExternalImages} onBack={() => setSelectedId(null)} /> : <section className="reading-panel empty-reader" aria-label="Message reader"><StatePanel title="A little space for your mail">Select a message to read it and inspect its delivery details.</StatePanel><p className="reader-footnote">Your inbox works independently of AI.</p></section>}
   </main>;
 }
 
