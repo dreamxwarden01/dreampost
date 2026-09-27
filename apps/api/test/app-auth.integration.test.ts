@@ -175,10 +175,10 @@ describe.skipIf(!databaseUrl)('application SSO and mailbox authorization with Po
     } finally { await pool.query('ALTER TABLE mailboxes DROP CONSTRAINT test_block_provisioning'); }
   });
 
-  it('exposes only authentication mode publicly and rejects the development bearer in SSO mode', async () => {
+  it('exposes only safe capabilities publicly and rejects the development bearer in SSO mode', async () => {
     const mode = await app.inject({ url: '/api/config' });
     expect(mode.statusCode).toBe(200);
-    expect(mode.json()).toEqual({ authentication: 'sso' });
+    expect(mode.json()).toEqual({ authentication: 'sso', everydayMail: true, outbound: { enabled: false, capabilities: { maxMessageBytes: 5 * 1024 * 1024, maxRecipients: 50, supportsIdempotencyKey: false }, maxAttachmentBytes: 25 * 1024 * 1024 } });
     expect(mode.headers['cache-control']).toBe('no-store');
     expect((await app.inject({ url: '/api/mailboxes', headers: { authorization: `Bearer ${devToken}` } })).statusCode).toBe(401);
     expect((await app.inject({ url: '/api/addresses', headers: { authorization: `Bearer ${devToken}` } })).statusCode).toBe(401);

@@ -1,5 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import PostalMime from 'postal-mime';
+import { Parser } from 'htmlparser2';
 
 // This worker interprets MIME only. It never evaluates markup or attachment contents.
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
@@ -30,10 +31,36 @@ try {
     if (Array.isArray(value.group)) return `${clean(value.name)}: ${value.group.map(formatAddress).join(', ')};`;
     return value.name && value.address ? `${value.name} <${value.address}>` : value.address ?? value.name ?? '';
   };
+  const addresses = (values) => {
+    const result = [];
+    const visit = (items, depth = 0) => {
+      if (depth > 4) { warnings.add('address_group_depth_limit'); return; }
+      for (const item of items ?? []) {
+        if (result.length >= 100) { warnings.add('address_count_limit'); return; }
+        if (Array.isArray(item.group)) { visit(item.group, depth + 1); continue; }
+        const address = clean(item.address ?? '').trim();
+        if (!address || address.length > 512 || /[\r\n\u0000-\u001f\u007f]/.test(address)) {
+          warnings.add('invalid_parsed_address'); continue;
+        }
+        result.push({ name: bounded(item.name, 4096, 'address_name_truncated'), address });
+      }
+    };
+    visit(values); return result;
+  };
+  const referenceIds = (name) => {
+    const raw = header(email.headers.filter(item => item.key === name).map(item => item.value).join(' '));
+    const ids = raw.match(/<[^<>\s\u0000-\u001f\u007f]{1,998}>/g) ?? [];
+    if (ids.length > 100) warnings.add('reference_count_limit');
+    return ids.slice(0, 100);
+  };
   const dateHeaders = email.headers.filter((item) => item.key === 'date');
   const fromHeaders = email.headers.filter((item) => item.key === 'from');
+  const replyHeaders = email.headers.filter((item) => item.key === 'reply-to');
+  const idHeaders = email.headers.filter((item) => item.key === 'message-id');
   if (dateHeaders.length > 1) warnings.add('multiple_date_headers');
   if (fromHeaders.length > 1) warnings.add('multiple_from_headers');
+  if (replyHeaders.length > 1) warnings.add('multiple_reply_to_headers');
+  if (idHeaders.length > 1) warnings.add('multiple_message_id_headers');
   const timestamp = email.date ? Date.parse(email.date) : Number.NaN;
   const sentAt = dateHeaders.length <= 1 && Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
   const headers = {
@@ -42,10 +69,33 @@ try {
     to: header((email.to ?? []).map(formatAddress).join(', ')),
     cc: header((email.cc ?? []).map(formatAddress).join(', ')),
     dateHeader: header(dateHeaders.map((item) => item.value).join('\n')), sentAt,
-    messageId: header(email.messageId),
+    attachmentCount: email.attachments.length,
+    messageId: idHeaders.length === 1 ? header(email.messageId) : '',
+    inReplyTo: referenceIds('in-reply-to'),
+    references: referenceIds('references'),
+    addresses: {
+      from: fromHeaders.length === 1 ? addresses(email.from ? [email.from] : []) : [],
+      replyTo: replyHeaders.length <= 1 ? addresses(email.replyTo) : [],
+      to: addresses(email.to), cc: addresses(email.cc),
+    },
   };
-  const text = bounded(email.text, MAX_TEXT_BYTES, 'plain_text_truncated');
   let htmlSource = email.html ? clean(email.html) : null;
+  const plainHtml = (html) => {
+    const parts = [], hidden = [];
+    const excluded = new Set(['script', 'style', 'template', 'noscript', 'svg', 'math', 'head']);
+    const blocks = new Set(['p', 'div', 'br', 'hr', 'tr', 'li', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'pre']);
+    const parser = new Parser({
+      onopentag(name) { hidden.push(Boolean(hidden.at(-1)) || excluded.has(name)); if (!hidden.at(-1) && blocks.has(name)) parts.push('\n'); },
+      ontext(value) { if (!hidden.at(-1)) parts.push(value); },
+      onclosetag(name) { const skip = hidden.pop(); if (!skip && blocks.has(name)) parts.push('\n'); },
+    }, { decodeEntities: true });
+    parser.end(html);
+    return parts.join('').replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  };
+  // HTML-only mail needs searchable, quotable text. This is inert text extraction
+  // inside the bounded MIME worker; it never loads resources or evaluates markup.
+  const textSource = email.text || (htmlSource && Buffer.byteLength(htmlSource, 'utf8') <= MAX_HTML_BYTES ? plainHtml(htmlSource) : '');
+  const text = bounded(textSource, MAX_TEXT_BYTES, 'plain_text_truncated');
   if (htmlSource !== null && Buffer.byteLength(htmlSource, 'utf8') > MAX_HTML_BYTES) {
     warnings.add('html_too_large'); htmlSource = null;
   }

@@ -166,6 +166,18 @@ describe.skipIf(!databaseUrl)('reader HTTP with real ingestion, PostgreSQL, and 
     if (directory) await rm(directory, { recursive: true, force: true });
   });
 
+  it('rechecks a background HTML render without renewing the source idle deadline', async () => {
+    await pool.query("UPDATE auth_sessions SET idle_expires_at=now()+interval '2 minutes' WHERE principal_id=$1", [alice.id]);
+    const deadline = async () => (await pool.query<{ value: string }>("SELECT idle_expires_at::text AS value FROM auth_sessions WHERE principal_id=$1", [alice.id])).rows[0]!.value;
+    const before = await deadline();
+    const quiet = await ssoApp.inject({ url: `${path()}/render`, headers: { ...sessionHeaders(alice), 'x-dreampost-background': '1' } });
+    expect(quiet.statusCode).toBe(200);
+    expect(await deadline()).toBe(before);
+    const foreground = await ssoApp.inject({ url: `${path()}/render`, headers: sessionHeaders(alice) });
+    expect(foreground.statusCode).toBe(200);
+    expect(Date.parse(await deadline())).toBeGreaterThan(Date.parse(before));
+  });
+
   it('exposes useful parsed details without raw HTML, inline bytes, or forged authentication evidence', async () => {
     const response = await devApp.inject({ url: path(), headers: devHeaders() });
     expect(response.statusCode).toBe(200);

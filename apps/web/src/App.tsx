@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { errorMessage, getMailbox, getMessages, type Mailbox, type MessageSummary } from './api';
+import type { OutboundConfig } from './compose/api';
 import { SsoWorkspace } from './SsoWorkspace';
 import { MessageReader } from './MessageReader';
 import { clearAttachmentAccessCache, parseAttachmentConfig, type AttachmentConfig } from './attachments/api';
@@ -159,6 +160,8 @@ function DevelopmentApp({ attachmentConfig }: { attachmentConfig?: AttachmentCon
 }
 
 export function App() {
+  const [everydayMail, setEverydayMail] = useState(false);
+  const [outbound, setOutbound] = useState<OutboundConfig | undefined>();
   const [attachmentConfig, setAttachmentConfig] = useState<AttachmentConfig | undefined>();
   const [mode, setMode] = useState<'loading' | 'development' | 'sso' | 'error'>('loading');
   useEffect(() => {
@@ -170,12 +173,19 @@ export function App() {
         if (!config || typeof config !== 'object' || !('authentication' in config) || !['development', 'sso'].includes(String(config.authentication))) throw new Error('Invalid configuration');
         if (!controller.signal.aborted) {
           const attachments = 'attachments' in config ? parseAttachmentConfig(config.attachments, window.location.origin) : undefined;
+          setEverydayMail('everydayMail' in config && config.everydayMail === true);
+          if ('outbound' in config && config.outbound && typeof config.outbound === 'object' && 'enabled' in config.outbound) {
+            const value = config.outbound as Record<string, unknown>;
+            const capabilities = value.capabilities && typeof value.capabilities === 'object' ? value.capabilities as Record<string, unknown> : {};
+            const number = (source: Record<string, unknown>, key: string) => typeof source[key] === 'number' && Number.isSafeInteger(source[key]) && Number(source[key]) > 0 ? source[key] as number : undefined;
+            setOutbound({ enabled: value.enabled === true, maxAttachmentBytes: number(value, 'maxAttachmentBytes'), maxMessageBytes: number(capabilities, 'maxMessageBytes'), maxRecipients: number(capabilities, 'maxRecipients') });
+          }
           setAttachmentConfig(attachments); setMode(config.authentication as 'development' | 'sso');
         }
       }).catch(() => { if (!controller.signal.aborted) setMode('error'); });
     return () => controller.abort();
   }, []);
   if (mode === 'development') return <DevelopmentApp attachmentConfig={attachmentConfig} />;
-  if (mode === 'sso') return <SsoWorkspace attachmentConfig={attachmentConfig} />;
+  if (mode === 'sso') return <SsoWorkspace attachmentConfig={attachmentConfig} everydayMail={everydayMail} outbound={outbound} />;
   return <main className="connection-page"><section className="connection-card"><h1>DreamPost</h1><p>{mode === 'error' ? 'Cannot reach the mail service. Check the connection and reload.' : 'Connecting to your mail service…'}</p>{mode === 'error' && <button className="button primary" onClick={() => window.location.reload()}>Reload</button>}</section></main>;
 }

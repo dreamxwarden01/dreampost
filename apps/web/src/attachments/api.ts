@@ -74,7 +74,7 @@ const headers = (access: MailAccess, mutating = false): Record<string, string> =
 });
 
 export async function getAttachments(access: MailAccess, signal: AbortSignal): Promise<AttachmentList> {
-  return parseAttachmentList(await json(await checkedFetch(path(access), { signal, headers: headers(access), credentials: access.token ? 'omit' : 'same-origin', cache: 'no-store', redirect: 'error' })));
+  return parseAttachmentList(await json(await checkedFetch(path(access), { signal, headers: { ...headers(access), 'X-DreamPost-Background': '1' }, credentials: access.token ? 'omit' : 'same-origin', cache: 'no-store', redirect: 'error' })));
 }
 
 const accessNamespaces = new WeakMap<AttachmentAccess, string>();

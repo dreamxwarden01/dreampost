@@ -102,7 +102,11 @@ try {
         if (failInventory && /\/attachments$/.test(url.pathname)) { response.writeHead(403, { 'Content-Type': 'application/json' }).end('{"error":"forbidden"}'); return; }
         await new Promise<void>((done, reject) => {
           const proxy = httpRequest(`${apiOrigin}${request.url}`, { method: request.method, headers: request.headers }, upstream => {
-            response.writeHead(upstream.statusCode ?? 502, upstream.headers); upstream.pipe(response); upstream.on('end', done); upstream.on('error', reject);
+            // Pin only the layout capability for this focused attachment harness; actual auth/transport remain unchanged.
+            if (url.pathname === '/api/config' && upstream.statusCode === 200) {
+              const chunks: Buffer[] = []; upstream.on('data', chunk => chunks.push(Buffer.from(chunk)));
+              upstream.on('end', () => { const config = JSON.parse(Buffer.concat(chunks).toString()); const body = Buffer.from(JSON.stringify({ ...config, everydayMail: false })); response.writeHead(200, { ...upstream.headers, 'content-length': String(body.length) }); response.end(body); done(); }); upstream.on('error', reject);
+            } else { response.writeHead(upstream.statusCode ?? 502, upstream.headers); upstream.pipe(response); upstream.on('end', done); upstream.on('error', reject); }
           }); proxy.on('error', reject); request.pipe(proxy);
         }); return;
       }

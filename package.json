@@ -31,7 +31,9 @@
     "jobs:attachments": "node --env-file=.local/dev.env --env-file-if-exists=.local/sso.env --env-file=.local/attachments.env --import tsx apps/api/src/commands/attachment-jobs.ts",
     "attachments:backfill": "node --env-file=.local/dev.env --import tsx apps/api/src/commands/backfill-attachments.ts",
     "test:attachments:browser": "node --env-file=.local/dev.env --import tsx tests/attachments-browser.ts",
-    "setup:attachments": "node scripts/setup-attachments.mjs"
+    "setup:attachments": "node scripts/setup-attachments.mjs",
+    "mail:backfill": "node --env-file=.local/dev.env --import tsx apps/api/src/commands/backfill-mail.ts",
+    "jobs:outbound": "node --env-file=.local/dev.env --env-file=.local/sso.env --env-file-if-exists=.local/attachments.env --env-file-if-exists=.local/outbound.env --import tsx apps/api/src/commands/outbound.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

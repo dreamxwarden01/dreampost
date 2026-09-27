@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { AuthConfig } from './auth/types.js';
 import { resolve } from 'node:path';
+import { loadOutboundConfig, type OutboundConfig } from './outbound/config.js';
 import { loadDownloadConfig, type DownloadConfig } from './downloads/config.js';
 
 export interface ApiConfig {
@@ -16,6 +17,7 @@ export interface ApiConfig {
   addresses?: { defaultDomain: string; managedDomains: string[]; reservedLocalParts?: string[] };
   policySync?: { gatewayUrl: string; key: { id: string; secret: string } };
   downloads?: DownloadConfig;
+  outbound?: OutboundConfig;
 }
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -100,11 +102,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   if (downloads && (Object.values(ingestKeys).includes(downloads.key.secret) || downloads.key.secret === policySync?.key.secret || downloads.key.secret === devViewToken)) {
     throw new Error('Download credentials must not reuse existing application or gateway secrets');
   }
+  const outbound = loadOutboundConfig(env, required('MAIL_STORE_PATH'));
+  if (outbound.apiToken && (Object.values(ingestKeys).includes(outbound.apiToken) || outbound.apiToken === downloads?.key.secret || outbound.apiToken === policySync?.key.secret)) throw new Error('Outbound provider credentials must be separate from machine signing keys');
   const port = Number(env['PORT'] ?? '3001');
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be between 1 and 65535');
   return {
     databaseUrl, mailStorePath: resolve(required('MAIL_STORE_PATH')), ingestKeys,
     devViewToken, devMailboxId: devMailboxId.toLowerCase(), host: env['HOST'] ?? '127.0.0.1',
-    port, publicBaseUrl, ...(auth ? { auth } : {}), ...(addresses ? { addresses } : {}), ...(policySync ? { policySync } : {}), ...(downloads ? { downloads } : {}),
+    port, publicBaseUrl, ...(auth ? { auth } : {}), ...(addresses ? { addresses } : {}), ...(policySync ? { policySync } : {}), ...(downloads ? { downloads } : {}), outbound,
   };
 }

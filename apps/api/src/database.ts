@@ -25,16 +25,22 @@ export async function migrate(pool: Pool): Promise<void> {
   } finally { client.release(); }
 }
 
-export async function appendChange(client: PoolClient, mailboxId: string, deliveryId: string, kind: string): Promise<void> {
+export async function appendChange(
+  client: PoolClient, mailboxId: string, deliveryId: string | null, kind: string,
+  options: { actorId?: string | null; data?: Record<string, unknown> } = {},
+): Promise<void> {
   const { rows } = await client.query<{ change_sequence: string }>(
-    'UPDATE mailboxes SET change_sequence = change_sequence + 1 WHERE id = $1 RETURNING change_sequence',
-    [mailboxId],
+    'UPDATE mailboxes SET change_sequence = change_sequence + 1 WHERE id = $1 RETURNING change_sequence', [mailboxId],
   );
   if (!rows[0]) throw new Error('mailbox_missing');
   await client.query(
-    'INSERT INTO mailbox_changes (mailbox_id, sequence, delivery_id, kind) VALUES ($1, $2, $3, $4)',
-    [mailboxId, rows[0].change_sequence, deliveryId, kind],
+    'INSERT INTO mailbox_changes (mailbox_id, sequence, delivery_id, kind, actor_principal_id, data) VALUES ($1,$2,$3,$4,$5,$6)',
+    [mailboxId, rows[0].change_sequence, deliveryId, kind, options.actorId ?? null, options.data ?? {}],
   );
+  // PostgreSQL delivers NOTIFY only after this business transaction commits. The
+  // durable sequence remains authoritative if a listener disconnects or misses it.
+  await client.query("SELECT pg_notify('dreampost_mailbox_changes', $1)",
+    [JSON.stringify({ mailboxId, sequence: rows[0].change_sequence, actorId: options.actorId ?? null })]);
 }
 
 export async function seedMailbox(pool: Pool, mailbox: { id: string; address: string; name: string }): Promise<void> {

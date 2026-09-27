@@ -1,11 +1,14 @@
 import { Worker } from 'node:worker_threads';
 import type { Pool, PoolClient } from 'pg';
-import { MAX_INBOUND_BYTES, type DeliveryMetadata } from '@dreampost/protocol';
+import { MAX_INBOUND_BYTES } from '@dreampost/protocol';
 
-export const READER_PARSER_VERSION = 1;
+export const READER_PARSER_VERSION = 2;
+export interface ParsedMailAddress { name: string; address: string }
 export interface ReaderHeaders {
   from: string; replyTo: string; to: string; cc: string; subject: string;
   dateHeader: string; sentAt: string | null; messageId: string;
+  inReplyTo?: string[]; references?: string[]; attachmentCount?: number;
+  addresses?: { from: ParsedMailAddress[]; replyTo: ParsedMailAddress[]; to: ParsedMailAddress[]; cc: ParsedMailAddress[] };
 }
 /** Untrusted MIME candidates, never a validation result or an attachment download API. */
 export interface InlineCandidate { contentId: string; mimeType: string; base64: string; sizeBytes: number }
@@ -91,7 +94,7 @@ export async function getReaderData(pool: Pick<Pool, 'query'>, deliveryId: strin
   return row ? { parserVersion: row.parser_version, headers: row.headers, htmlSource: row.html_source, inlineCandidates: row.inline_candidates, warnings: row.warnings } : null;
 }
 
-export function readerSummary(data: ReaderData | null, metadata: Pick<DeliveryMetadata, 'envelopeFrom' | 'envelopeTo'>) {
+export function readerSummary(data: ReaderData | null, metadata: { envelopeFrom?: unknown; envelopeTo?: unknown }) {
   return { hasHtml: !!data?.htmlSource, replyTo: data?.headers.replyTo ?? '', cc: data?.headers.cc ?? '', sentAt: data?.headers.sentAt ?? null,
     envelopeFrom: typeof metadata.envelopeFrom === 'string' ? metadata.envelopeFrom : '', envelopeTo: typeof metadata.envelopeTo === 'string' ? metadata.envelopeTo : '' };
 }

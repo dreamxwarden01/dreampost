@@ -55,7 +55,11 @@ const web = createServer((request, response) => {
   if (['/api/', '/auth/', '/backchannel/', '/.well-known/'].some(prefix => path.startsWith(prefix))) {
     if (!apiOrigin) { response.writeHead(503).end(); return; }
     const proxy = httpRequest(`${apiOrigin}${request.url}`, { method: request.method, headers: request.headers }, upstream => {
-      response.writeHead(upstream.statusCode ?? 502, upstream.headers); upstream.pipe(response);
+      // Keep this reader-specific harness on the established read-only layout; all reader/auth APIs remain real.
+      if (path === '/api/config' && upstream.statusCode === 200) {
+        const chunks: Buffer[] = []; upstream.on('data', chunk => chunks.push(Buffer.from(chunk)));
+        upstream.on('end', () => { const config = JSON.parse(Buffer.concat(chunks).toString()); const body = Buffer.from(JSON.stringify({ ...config, everydayMail: false })); response.writeHead(200, { ...upstream.headers, 'content-length': String(body.length) }); response.end(body); });
+      } else { response.writeHead(upstream.statusCode ?? 502, upstream.headers); upstream.pipe(response); }
     });
     proxy.on('error', () => { if (!response.headersSent) response.writeHead(502); response.end(); });
     request.pipe(proxy); return;

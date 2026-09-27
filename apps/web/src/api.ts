@@ -17,6 +17,7 @@ export interface MessageSummary {
 
 export interface MessageDetail extends Omit<MessageSummary, 'preview'> {
   text: string;
+  addresses?: { from: Array<{ name: string; address: string }>; replyTo: Array<{ name: string; address: string }>; to: Array<{ name: string; address: string }>; cc: Array<{ name: string; address: string }> };
   reader: {
     hasHtml: boolean;
     contentVersion: string;
@@ -80,12 +81,12 @@ function messageFields(value: unknown): Omit<MessageSummary, 'preview'> {
   };
 }
 
-async function request(path: string, token: string, signal: AbortSignal, accept = 'application/json'): Promise<Response> {
+async function request(path: string, token: string, signal: AbortSignal, accept = 'application/json', background = false): Promise<Response> {
   let response: Response;
   try {
     response = await fetch(path, {
       signal,
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), Accept: accept },
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), Accept: accept, ...(background ? { 'X-DreamPost-Background': '1' } : {}) },
       credentials: token ? 'omit' : 'same-origin',
       cache: 'no-store',
       redirect: 'error',
@@ -134,9 +135,9 @@ export async function getMessages(mailboxId: string, token: string, signal: Abor
   return list(data.messages).map((value) => ({ ...messageFields(value), preview: string(record(value).preview) }));
 }
 
-export async function getMessage(mailboxId: string, messageId: string, token: string, signal: AbortSignal): Promise<MessageDetail> {
+export async function getMessage(mailboxId: string, messageId: string, token: string, signal: AbortSignal, background = false): Promise<MessageDetail> {
   const path = `${mailboxPath(mailboxId)}/${encodeURIComponent(messageId)}`;
-  const data = await json(await request(path, token, signal));
+  const data = await json(await request(path, token, signal, 'application/json', background));
   const detail = record(data.message);
   const reader = record(detail.reader);
   if (typeof reader.hasHtml !== 'boolean' || (reader.sentAt !== null && typeof reader.sentAt !== 'string')) return invalidResponse();
@@ -147,6 +148,11 @@ export async function getMessage(mailboxId: string, messageId: string, token: st
       sentAt: reader.sentAt, envelopeFrom: string(reader.envelopeFrom), envelopeTo: string(reader.envelopeTo),
     },
   };
+  if (detail.addresses !== undefined) {
+    const a = record(detail.addresses);
+    const entries = (raw: unknown) => list(raw).map(value => { const address = record(value); return { name: string(address.name), address: string(address.address) }; });
+    message.addresses = { from: entries(a.from), replyTo: entries(a.replyTo), to: entries(a.to), cc: entries(a.cc) };
+  }
   if (message.id !== messageId) return invalidResponse();
   return message;
 }

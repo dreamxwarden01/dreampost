@@ -212,7 +212,8 @@ describe.skipIf(!databaseUrl)('DreamSSO authentication with real PostgreSQL', ()
   it('uses PKCE/private_key_jwt and an HttpOnly session without promoting the first user', async () => {
     const result = await login();
     expect(mock.tokenExchanges).toBe(1);
-    expect(result.session.actor).toMatchObject({ issuer, subject: alice.sub, username: 'alice', roleId: 1, permissions: ['mailbox.use'] });
+    expect(result.session.actor).toMatchObject({ issuer, subject: alice.sub, username: 'alice', roleId: 1 });
+    expect(new Set(result.session.actor.permissions)).toEqual(new Set(['mailbox.use', 'mail.send', 'mail.manage']));
     expect(result.session.csrfToken).toHaveLength(43);
     expect(provisioned).toHaveLength(1);
     const cookie = cookies(result.response).find((value) => value.startsWith(`${SECURE_SESSION_COOKIE}=`))!;
@@ -471,6 +472,39 @@ describe.skipIf(!databaseUrl)('DreamSSO authentication with real PostgreSQL', ()
       await client.query('ROLLBACK');
       contender.release(); client.release();
     }
+  });
+
+  it('checks mutation CSRF in a read-only preflight without locking principals or renewing idle time', async () => {
+    app.post('/preflight', async request => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+        await client.query("SET LOCAL lock_timeout = '100ms'");
+        const actor = await auth.authorizeRequest(request, { client, mutating: true, readOnly: true });
+        await client.query('COMMIT');
+        return { principalId: actor.principalId };
+      } catch (error) { await client.query('ROLLBACK'); throw error; }
+      finally { client.release(); }
+    });
+    const current = await login();
+    const before = (await pool.query('SELECT last_seen,idle_expires_at FROM auth_sessions')).rows;
+    mock.now += 10_000;
+    const locker = await pool.connect();
+    try {
+      await locker.query('BEGIN');
+      await locker.query('SELECT id FROM principals WHERE id=$1 FOR UPDATE', [current.session.actor.principalId]);
+      expect((await app.inject({ method: 'POST', url: '/preflight', headers: {
+        cookie: current.cookie, origin, 'x-csrf-token': current.session.csrfToken,
+      } })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'POST', url: '/preflight', headers: {
+        cookie: current.cookie, origin, 'x-csrf-token': 'invalid',
+      } })).statusCode).toBe(403);
+      expect((await pool.query('SELECT last_seen,idle_expires_at FROM auth_sessions')).rows).toEqual(before);
+    } finally { await locker.query('ROLLBACK'); locker.release(); }
+    await pool.query('UPDATE principals SET access_enabled=false WHERE id=$1', [current.session.actor.principalId]);
+    expect((await app.inject({ method: 'POST', url: '/preflight', headers: {
+      cookie: current.cookie, origin, 'x-csrf-token': current.session.csrfToken,
+    } })).statusCode).toBe(401);
   });
 
   it('expires an idle session and supports CSRF-protected RP initiated logout', async () => {

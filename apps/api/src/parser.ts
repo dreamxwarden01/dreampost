@@ -2,6 +2,7 @@ import { parseMimeIsolated, ReaderParseError, READER_PARSER_VERSION, storeReader
 import type { Pool } from 'pg';
 import type { RawBlobStore } from './blob-store.js';
 import { appendChange } from './database.js';
+import { indexMessageThread } from './mail/threading.js';
 
 interface JobRow { id: string; delivery_id: string; attempts: number; }
 interface MessageRow { mailbox_id: string; sha256: string; }
@@ -46,6 +47,9 @@ export async function runOneParseJob(pool: Pool, blobs: RawBlobStore): Promise<b
         [job.delivery_id, parsed.subject, parsed.from, parsed.to, parsed.text, parsed.preview],
       );
       await storeReaderData(client, job.delivery_id, parsed.reader);
+      await indexMessageThread(client, { mailboxId: message.mailbox_id, messageId: job.delivery_id,
+        messageIdHeader: parsed.reader.headers.messageId, references: parsed.reader.headers.references,
+        inReplyTo: parsed.reader.headers.inReplyTo, parserVersion: parsed.reader.parserVersion });
       await client.query(
         "UPDATE durable_jobs SET status = 'done', attempts = attempts + 1, last_error_code = NULL, completed_at = now() WHERE id = $1",
         [job.id],

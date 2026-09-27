@@ -30,7 +30,7 @@ describe('isolated MIME reader extraction', () => {
     const html = '<script>notExecuted()</script><p>Hello</p><img src="https://example.test/tracker">';
     const result = await parseMimeIsolated(raw(html, 'Content-Type: text/html; charset=utf-8'));
     expect(result.reader.htmlSource).toBe(html + '\n');
-    expect(result.text).toBe('');
+    expect(result.text).toBe('Hello');
     const summary = readerSummary(result.reader, { envelopeFrom: 'bounce@example.test', envelopeTo: 'alias@example.test' });
     expect(summary).toEqual({ hasHtml: true, replyTo: 'Help <reply@example.test>', cc: 'Copy <copy@example.test>',
       sentAt: '2026-09-26T08:11:12.000Z', envelopeFrom: 'bounce@example.test', envelopeTo: 'alias@example.test' });

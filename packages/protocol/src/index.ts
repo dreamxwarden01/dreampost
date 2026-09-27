@@ -246,3 +246,7 @@ export * from './policy.js';
 export * from './gateway-operations.js';
 
 export * from './downloads.js';
+
+export * from './mail.js';
+
+export * from './compose.js';

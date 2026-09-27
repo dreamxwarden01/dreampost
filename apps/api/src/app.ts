@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import Fastify, { LogController, type FastifyRequest } from 'fastify';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import {
   INGEST_PATH, MAX_INBOUND_BYTES, verifyDeliveryHeaders, verifyDeliveryBody, type VerifiedDelivery,
 } from '@dreampost/protocol';
@@ -14,8 +14,12 @@ import { AddressService, registerAddressRoutes } from './addresses/index.js';
 import { getReaderData, readerSummary } from './reader-data.js';
 import { registerReaderPreferenceRoutes } from './reader-preferences.js';
 import { renderHtmlIsolated } from './html-reader.js';
-import type { DeliveryMetadata } from '@dreampost/protocol';
+import type { DeliveryMetadata, MailTransport } from '@dreampost/protocol';
 import { registerDownloadControl, registerAttachmentRoutes } from './downloads/http.js';
+import { MailService, registerMailRoutes, type MailViewer } from './mail/index.js';
+import { loadOutboundConfig } from './outbound/config.js';
+import { OutboundService, CloudflareRawTransport, registerOutboundRoutes } from './outbound/index.js';
+import { createOutboundDependencies } from './outbound-integration.js';
 
 interface MessageRow {
   id: string;
@@ -28,10 +32,10 @@ interface MessageRow {
   parse_status: string;
   raw_size: number;
   sha256: string;
-  metadata: DeliveryMetadata;
+  metadata: DeliveryMetadata | { kind: 'outbound'; submissionId: string; envelopeFrom: string };
 }
 
-export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBlobStore; logger?: boolean; authFetch?: typeof fetch } = {}) {
+export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBlobStore; logger?: boolean; authFetch?: typeof fetch; outboundTransport?: MailTransport; onOutboundService?: (service: OutboundService) => void } = {}) {
   const blobs = options.blobs ?? new FileBlobStore(config.mailStorePath);
   const app = Fastify({
     bodyLimit: MAX_INBOUND_BYTES,
@@ -68,9 +72,25 @@ export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBl
     }
   }
   const downloads = registerDownloadControl(app, config, pool, auth);
+  const mail = new MailService(pool);
+  const outboundConfiguration = config.outbound ?? loadOutboundConfig({});
+  if (auth && addresses) {
+    const dependencies = createOutboundDependencies(config, pool, auth, addresses, blobs);
+    if (options.outboundTransport) dependencies.transport = options.outboundTransport;
+    else if (outboundConfiguration.enabled) dependencies.transport = new CloudflareRawTransport(outboundConfiguration);
+    const outbound = new OutboundService(pool, outboundConfiguration, dependencies);
+    options.onOutboundService?.(outbound);
+    registerOutboundRoutes(app, outbound, async (request, options: { mutating: boolean; client?: PoolClient; readOnly?: boolean }) => {
+      if (!options.mutating && request.headers['x-dreampost-background'] === '1') {
+        const source = await auth!.downloadSource(request, options.client);
+        return (await auth!.authorizeSessionReference(source.sessionId, source.principalId, options.client)).actor;
+      }
+      return auth!.authorizeRequest(request, options);
+    });
+  }
   app.get('/api/config', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store');
-    return { authentication: auth ? 'sso' : 'development', ...(config.downloads ? { attachments: { downloadOrigin: config.downloads.origin, previewOrigin: config.downloads.previewOrigin, maxPreviewBytes: config.downloads.maxPreviewBytes } } : {}) };
+    return { authentication: auth ? 'sso' : 'development', everydayMail: !!auth, outbound: { enabled: !!auth && outboundConfiguration.enabled, capabilities: { maxMessageBytes: outboundConfiguration.maxMessageBytes, maxRecipients: outboundConfiguration.maxRecipients, supportsIdempotencyKey: false }, maxAttachmentBytes: outboundConfiguration.maxAttachmentBytes }, ...(config.downloads ? { attachments: { downloadOrigin: config.downloads.origin, previewOrigin: config.downloads.previewOrigin, maxPreviewBytes: config.downloads.maxPreviewBytes } } : {}) };
   });
   app.get('/healthz', async () => ({ status: 'ok' }));
   app.get('/readyz', async (_request, reply) => {
@@ -97,7 +117,14 @@ export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBl
     const actors = new WeakMap<FastifyRequest, Actor>();
     api.addHook('onRequest', async (request, reply) => {
       reply.header('Cache-Control', 'no-store');
-      if (auth) { actors.set(request, await auth.authorizeRequest(request)); return; }
+      if (auth) {
+        const background = request.method === 'GET' && (request.routeOptions.url === '/api/mailboxes/:id/events' || request.headers['x-dreampost-background'] === '1');
+        if (background) {
+          const source = await auth.downloadSource(request);
+          actors.set(request, (await auth.authorizeSessionReference(source.sessionId, source.principalId)).actor);
+        } else actors.set(request, await auth.authorizeRequest(request, { mutating: !['GET', 'HEAD', 'OPTIONS'].includes(request.method) }));
+        return;
+      }
       const supplied = request.headers.authorization;
       const expected = Buffer.from(`Bearer ${config.devViewToken}`);
       const candidate = Buffer.from(typeof supplied === 'string' ? supplied : '');
@@ -149,22 +176,34 @@ export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBl
       );
       return { mailboxes: rows };
     });
-    api.get<{ Params: { id: string } }>('/mailboxes/:id/messages', async (request) => {
-      await authorizeMailbox(request, request.params.id);
-      const { rows } = await pool.query<MessageRow>(
-        `SELECT id, subject, from_header, to_header, received_at, preview, parse_status, raw_size
-         FROM deliveries WHERE mailbox_id = $1 AND deleted_at IS NULL
-         ORDER BY received_at DESC, id DESC LIMIT 100`, [request.params.id],
-      );
-      return { messages: rows.map((row) => ({
-        id: row.id, subject: row.subject, from: row.from_header, to: row.to_header,
-        receivedAt: row.received_at.toISOString(), preview: row.preview, status: row.parse_status, sizeBytes: row.raw_size,
-      })) };
+    const mailViewer = (request: FastifyRequest): MailViewer => {
+      const actor = actors.get(request);
+      return actor ? { principalId: actor.principalId, permissions: actor.permissions }
+        : { principalId: null, permissions: new Set(['mailbox.use']), developmentMailboxId: config.devMailboxId };
+    };
+    registerMailRoutes(api, mail, {
+      authenticate: async (request, options) => {
+        if (options.client && options.mutating) {
+          if (!auth) throw new ApiError(403, 'development_read_only');
+          const actor = await auth.authorizeRequest(request, { mutating: true, client: options.client });
+          return { principalId: actor.principalId, permissions: actor.permissions };
+        }
+        return mailViewer(request);
+      },
+      ...(auth ? {
+        captureStream: (request: FastifyRequest) => auth!.downloadSource(request),
+        recheckStream: async (source: { sessionId: string; principalId: string }) => {
+          const result = await auth!.authorizeSessionReference(source.sessionId, source.principalId);
+          return { viewer: { principalId: result.actor.principalId, permissions: result.actor.permissions }, expiresAt: result.expiresAt };
+        },
+      } : {}),
     });
     api.get<{ Params: { id: string; messageId: string } }>('/mailboxes/:id/messages/:messageId', async (request) => {
       const row = await getMessage(request, request.params.id, request.params.messageId);
       const reader = await getReaderData(pool, row.id);
+      const state = await mail.getState(mailViewer(request), request.params.id, row.id);
       return { message: {
+        ...state, ...(reader?.headers.addresses ? { addresses: reader.headers.addresses } : {}),
         id: row.id, subject: row.subject, from: row.from_header, to: row.to_header,
         receivedAt: row.received_at.toISOString(), text: row.plain_text, status: row.parse_status, sizeBytes: row.raw_size,
         reader: { ...readerSummary(reader, row.metadata), contentVersion: `${row.sha256}:${reader?.parserVersion ?? 0}:html-render-policy-1` },
@@ -188,7 +227,12 @@ export function buildApp(config: ApiConfig, pool: Pool, options: { blobs?: RawBl
         { principalKey: auth ? actors.get(request)!.principalId : `development:${config.devMailboxId}`, signal: cancelled.signal });
       } finally { reply.raw.removeListener('close', onClosed); }
       // Rendering is isolated and may take time. Recheck session and current mailbox access before returning content.
-      if (auth) actors.set(request, await auth.authorizeRequest(request));
+      if (auth) {
+        if (request.headers['x-dreampost-background'] === '1') {
+          const source = await auth.downloadSource(request);
+          actors.set(request, (await auth.authorizeSessionReference(source.sessionId, source.principalId)).actor);
+        } else actors.set(request, await auth.authorizeRequest(request));
+      }
       await authorizeMailbox(request, request.params.id);
       reply.header('X-Content-Type-Options', 'nosniff');
       reply.header('X-DNS-Prefetch-Control', 'off');

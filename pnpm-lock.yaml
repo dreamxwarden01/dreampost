@@ -41,6 +41,9 @@ importers:
       jose:
         specifier: ^6.1.0
         version: 6.2.12
+      nodemailer:
+        specifier: 10.0.11
+        version: 10.0.11
       pg:
         specifier: 8.23.0
         version: 8.23.0
@@ -82,6 +85,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@dreampost/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       react:
         specifier: 19.3.0
         version: 19.3.0
@@ -1279,6 +1285,10 @@ packages:
     resolution: {integrity: sha512-Y2tUNy4ouw6tq5oDSKeQYGOyhkUBhNOcGV/02KC+6kd9eDGqdZd++mjMiIDilrBYvjEnCYvVtsuHCuP+okSfug==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
+
+  nodemailer@10.0.11:
+    resolution: {integrity: sha512-/c4P7U7aGpiNu2Rl08q525q2zECkUpSaf2zQPgIStCcAjHAkkQQKwD4sTyi3l91mGcLQrKzL1syXPHymo+Ogtw==}
+    engines: {node: '>=20.0.0'}
 
   obug@2.2.1:
     resolution: {integrity: sha512-XrsrhT5sybtKI6wakr2SPOlGZWWYbUXZ7a0jT8/QOeAPau+1X/bSegNe5YR75oJmEZQbKningirmGOEJCIk61Q==}
@@ -2517,6 +2527,8 @@ snapshots:
       - utf-8-validate
 
   nanoid@3.3.19: {}
+
+  nodemailer@10.0.11: {}
 
   obug@2.2.1: {}
 

@@ -20,7 +20,7 @@ export interface AuthOptions {
   now?: () => number;
 }
 
-export const AUTH_PERMISSIONS = ['mailbox.use', 'addresses.manage', 'roles.manage'] as const;
+export const AUTH_PERMISSIONS = ['mailbox.use', 'mail.send', 'mail.manage', 'addresses.manage', 'roles.manage'] as const;
 export const SESSION_COOKIE = 'dreampost_session';
 export const SECURE_SESSION_COOKIE = '__Host-dreampost_session';
 export const FLOW_COOKIE_PREFIX = 'dreampost_flow_';

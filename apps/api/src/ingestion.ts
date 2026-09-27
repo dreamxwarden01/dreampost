@@ -4,6 +4,7 @@ import { normalizeRecipientAddress, type DeliveryAck, type DeliveryMetadata, typ
 import type { RawBlobStore } from './blob-store.js';
 import { appendChange } from './database.js';
 import { ApiError } from './errors.js';
+import { initializeMessageState } from './mail/threading.js';
 import { enqueueAttachmentExtraction } from './attachments/service.js';
 
 interface StoredDelivery { metadata: DeliveryMetadata; sha256: string; }
@@ -91,6 +92,7 @@ export async function ingest(pool: Pool, blobs: RawBlobStore, verified: Verified
       if (!raced.rows[0]) throw new Error('delivery_race');
       assertSame(raced.rows[0]!, verified);
     } else {
+      await initializeMessageState(client, { mailboxId: metadata.mailboxId, messageId: metadata.deliveryId });
       await client.query('INSERT INTO durable_jobs (id, delivery_id, kind) VALUES ($1, $2, $3)', [randomUUID(), metadata.deliveryId, 'parse']);
       if (options.attachments) await enqueueAttachmentExtraction(client, metadata.deliveryId);
       await appendChange(client, metadata.mailboxId, metadata.deliveryId, 'message.received');

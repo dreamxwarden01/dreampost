@@ -180,8 +180,8 @@ export class AuthService {
   }
 
   /** Capture only a durable reference; never give the download service an SSO cookie. */
-  async downloadSource(request: FastifyRequest): Promise<{ sessionId: string; principalId: string; expiresAt: number }> {
-    const row = await this.session(request);
+  async downloadSource(request: FastifyRequest, client?: PoolClient): Promise<{ sessionId: string; principalId: string; expiresAt: number }> {
+    const row = await this.session(request, client);
     return { sessionId: row.session_id, principalId: row.principal_id,
       expiresAt: Math.min(row.expires_at.getTime(), row.idle_expires_at.getTime()) };
   }
@@ -197,22 +197,22 @@ export class AuthService {
     return { actor, expiresAt: Math.min(current.expires_at.getTime(), current.idle_expires_at.getTime()) };
   }
 
-  async authorizeRequest(request: FastifyRequest, options: { mutating?: boolean; client?: PoolClient } = {}): Promise<Actor> {
+  async authorizeRequest(request: FastifyRequest, options: { mutating?: boolean; client?: PoolClient; readOnly?: boolean } = {}): Promise<Actor> {
     const session = await this.session(request, options.client);
     if (options.mutating) {
       if (request.headers.origin !== this.oidc.origin) throw new ApiError(403, 'origin_rejected');
       const csrf = request.headers['x-csrf-token'];
       if (typeof csrf !== 'string' || !secretEqual(csrf, session.csrf_token)) throw new ApiError(403, 'csrf_rejected');
     }
-    const actor = await this.resolvePrincipal(session.principal_id, options.client);
+    const actor = await this.resolvePrincipal(session.principal_id, options.client, { lock: !options.readOnly });
     // A transaction caller may have waited for revocation's principal lock.
     const current = await this.session(request, options.client);
     if (current.auth_version !== session.auth_version) throw new ApiError(401, 'authentication_required');
-    await (options.client ?? this.pool).query(
+    if (!options.readOnly) await (options.client ?? this.pool).query(
       'UPDATE auth_sessions SET last_seen = $2, idle_expires_at = LEAST(expires_at, $3) WHERE token_hash = $1',
       [session.token_hash, new Date(this.now()), new Date(this.now() + this.idleSeconds * 1000)],
     );
-    if (!options.client && session.next_activity_at.getTime() <= this.now()) {
+    if (!options.readOnly && !options.client && session.next_activity_at.getTime() <= this.now()) {
       void this.reportActivity(session).catch(() => {});
     }
     return actor;

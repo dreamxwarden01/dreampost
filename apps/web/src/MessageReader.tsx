@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { AttachmentSection } from './attachments/AttachmentSection';
 import type { AttachmentConfig } from './attachments/api';
 import { errorMessage, getMessage, getRawMessage, getRenderedMessage, type MessageDetail, type RenderedMessage } from './api';
@@ -10,6 +10,7 @@ function dateLabel(value: string): string {
 
 function MessageDetails({ message }: { message: MessageDetail }) {
   const [open, setOpen] = useState(false);
+  const detailsId = useId();
   const container = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -26,8 +27,8 @@ function MessageDetails({ message }: { message: MessageDetail }) {
     ['Received at', dateLabel(message.receivedAt)], ['Envelope sender', message.reader.envelopeFrom], ['Envelope recipient', message.reader.envelopeTo],
   ].filter(([, value]) => value);
   return <div className="message-details" ref={container}>
-    <button ref={button} className="details-button" aria-expanded={open} aria-controls="message-details-popover" onClick={() => setOpen(value => !value)}>Message details <span aria-hidden="true">⌄</span></button>
-    {open && <div id="message-details-popover" className="message-details-popover" role="region" aria-label="Message details"><dl>{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd dir="auto">{value}</dd></div>)}</dl></div>}
+    <button ref={button} className="details-button" aria-expanded={open} aria-controls={detailsId} onClick={() => setOpen(value => !value)}>Message details <span aria-hidden="true">⌄</span></button>
+    {open && <div id={detailsId} className="message-details-popover" role="region" aria-label="Message details"><dl>{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd dir="auto">{value}</dd></div>)}</dl></div>}
   </div>;
 }
 
@@ -40,9 +41,12 @@ interface ReaderProps {
   onBack: () => void;
   csrfToken?: string;
   attachmentConfig?: AttachmentConfig;
+  embedded?: boolean;
+  onOpened?: () => void;
+  onDetail?: (message: MessageDetail) => void;
 }
 
-export function MessageReader({ mailboxId, token, messageId, revision, autoLoadExternalImages, onBack, csrfToken, attachmentConfig }: ReaderProps) {
+export function MessageReader({ mailboxId, token, messageId, revision, autoLoadExternalImages, onBack, csrfToken, attachmentConfig, embedded = false, onOpened, onDetail }: ReaderProps) {
   const [message, setMessage] = useState<MessageDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +59,8 @@ export function MessageReader({ mailboxId, token, messageId, revision, autoLoadE
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const rawController = useRef<AbortController | null>(null);
+  const opened = useRef(false);
+  const openedCallback = useRef(onOpened);
   const imageMode = imageChoice ?? (autoLoadExternalImages ? 'allowed' : 'blocked');
   const showHtml = mode === 'html' && message?.reader.hasHtml === true;
   const contentVersion = message?.reader.contentVersion ?? null;
@@ -64,7 +70,7 @@ export function MessageReader({ mailboxId, token, messageId, revision, autoLoadE
     const controller = new AbortController();
     // The parent keys this component by mailbox/message. A same-message refresh keeps the visible body and scroll.
     setLoading(message === null); setError(null);
-    getMessage(mailboxId, messageId, token, controller.signal)
+    getMessage(mailboxId, messageId, token, controller.signal, message !== null)
       .then(data => { if (!controller.signal.aborted) setMessage(data); })
       .catch((failure: unknown) => { if (!controller.signal.aborted) setError(errorMessage(failure)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -82,6 +88,16 @@ export function MessageReader({ mailboxId, token, messageId, revision, autoLoadE
     return () => controller.abort();
   }, [mailboxId, messageId, token, contentVersion, showHtml, imageMode, renderRetry]);
 
+  useEffect(() => { if (message) onDetail?.(message); }, [message, onDetail]);
+  useEffect(() => { openedCallback.current = onOpened; }, [onOpened]);
+  useEffect(() => {
+    if (!opened.current && message && !loading && !error && (!showHtml || visibleRender)) {
+      // A refresh, a new callback or a format change is still the same opening.
+      // The parent remounts the reader for explicit selection and expansion.
+      opened.current = true;
+      openedCallback.current?.();
+    }
+  }, [message, loading, error, showHtml, visibleRender]);
   useEffect(() => () => rawController.current?.abort(), []);
 
   async function downloadRaw() {
@@ -100,9 +116,9 @@ export function MessageReader({ mailboxId, token, messageId, revision, autoLoadE
     finally { if (!controller.signal.aborted) setDownloading(false); }
   }
 
-  return <section className="reading-panel" aria-label="Message reader" aria-busy={loading}>
+  return <section className={`reading-panel ${embedded ? 'embedded-reader' : ''}`} aria-label="Message reader" aria-busy={loading}>
     <div className="reader-toolbar">
-      <button className="button subtle back-button" onClick={onBack}><span aria-hidden="true">←</span> Inbox</button>
+      {!embedded && <button className="button subtle back-button" onClick={onBack}><span aria-hidden="true">←</span> Inbox</button>}
       {message?.reader.hasHtml && <div className="reader-mode-toggle" role="group" aria-label="Message format">
         <button aria-pressed={mode === 'html'} onClick={() => setMode('html')}>HTML</button>
         <button aria-pressed={mode === 'text'} onClick={() => setMode('text')}>Plain text</button>

@@ -197,7 +197,7 @@ export class AddressService {
          VALUES ($1,'',$2,'personal',$3,'needs_address') RETURNING *`, [randomUUID(), 'Personal mailbox', principalId],
       );
       const mailbox = rows[0]!;
-      await client.query('INSERT INTO mailbox_memberships(mailbox_id,principal_id,permissions) VALUES ($1,$2,$3)', [mailbox.id, principalId, ['read', 'manage', 'send_as']]);
+      await client.query('INSERT INTO mailbox_memberships(mailbox_id,principal_id,permissions) VALUES ($1,$2,$3)', [mailbox.id, principalId, ['read', 'manage', 'manage_messages', 'send_as']]);
       try {
         if (!automaticLocalPattern.test(actor.username.toLowerCase())) throw new ApiError(400, 'invalid_automatic_username');
         const address = normalizeHostedAddress(`${actor.username}@${this.config.defaultDomain}`, this.config.managedDomains, false, this.config.reservedLocalParts);
@@ -374,6 +374,7 @@ export class AddressService {
     const result: SenderEligibility = { eligible: false, reason: null, allocationId, mailboxId: view.mailboxId, address: view.address, sendingGeneration: view.sendingGeneration, policyRevision: view.policyRevision };
     const deny = (why: string): SenderEligibility => ({ ...result, reason: why });
     if (!actor.permissions.has('mailbox.use')) return deny('mailbox_access_denied');
+    if (!actor.permissions.has('mail.send')) return deny('sending_permission_required');
     if (!view.current) return deny('allocation_ended');
     if (view.ownerPaused || view.adminPaused || view.systemPaused) return deny('address_paused');
     if (view.receiveOnly) return deny('receive_only');
@@ -392,6 +393,30 @@ export class AddressService {
     return this.transaction(principalId, await this.allocationMailboxId(allocationId), [], async (client, actor) => {
       await client.query('SELECT address FROM address_registry WHERE address = (SELECT address FROM address_allocations WHERE id = $1) FOR UPDATE', [allocationId]);
       return this.eligibility(client, actor, allocationId);
+    });
+  }
+  /** Fresh dispatch admission only; the callback must not perform provider network IO.
+   * The committed admission is the linearization point for an immediate bounded attempt.
+   */
+  async withSenderAdmission<T>(
+    input: { principalId: string; mailboxId: string; allocationId: string },
+    work: (client: PoolClient, sender: SenderEligibility) => Promise<T>,
+  ): Promise<T> {
+    requireUuid(input.allocationId);
+    return this.transaction(input.principalId, input.mailboxId, [], async (client, actor) => {
+      const binding = await client.query<{ address: string }>(
+        'SELECT address FROM address_allocations WHERE id=$1 AND mailbox_id=$2', [input.allocationId, input.mailboxId],
+      );
+      if (!binding.rows[0]) throw new ApiError(403, 'sending_identity_mailbox_mismatch');
+      await client.query('SELECT address FROM address_registry WHERE address=$1 FOR UPDATE', [binding.rows[0].address]);
+      await client.query('SELECT id FROM address_allocations WHERE id=$1 FOR UPDATE', [input.allocationId]);
+      await client.query('SELECT mailbox_id FROM mailbox_memberships WHERE mailbox_id=$1 AND principal_id=$2 FOR UPDATE',
+        [input.mailboxId, input.principalId]);
+      await client.query('SELECT id FROM address_send_grants WHERE allocation_id=$1 AND principal_id=$2 AND revoked_at IS NULL ORDER BY id FOR UPDATE',
+        [input.allocationId, input.principalId]);
+      const sender = await this.eligibility(client, actor, input.allocationId);
+      if (!sender.eligible) throw new ApiError(403, sender.reason ?? 'sending_identity_unavailable');
+      return work(client, sender);
     });
   }
   async listForActor(principalId: string): Promise<{ mailbox: PersonalMailbox | null; addresses: AddressView[]; requests: AddressRequestRow[] }> {

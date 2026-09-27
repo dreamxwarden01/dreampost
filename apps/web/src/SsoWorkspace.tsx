@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { Inbox } from './App';
+import { MailboxWorkspace } from './mailbox/MailboxWorkspace';
+import type { OutboundConfig } from './compose/api';
 import { errorMessage, getMailboxes, getReadingPreferences, sessionRequest, type Mailbox, type ReadingPreferences } from './api';
 import { AddressSettings } from './AddressSettings';
 import { ReadingSettings } from './ReadingSettings';
@@ -13,8 +15,14 @@ export interface UserSession {
   catalog: { configured?: boolean; syncedAt: string | null };
 }
 
-export function SsoWorkspace({ attachmentConfig }: { attachmentConfig?: AttachmentConfig }) {
+export function SsoWorkspace({ attachmentConfig, everydayMail = false, outbound }: { attachmentConfig?: AttachmentConfig; everydayMail?: boolean; outbound?: OutboundConfig }) {
   const [session, setSession] = useState<UserSession | null>(null);
+  const sessionRef = useRef(session); sessionRef.current = session;
+  const composerOpen = useRef(false), composerDirty = useRef(false);
+  const [hasComposer, setHasComposer] = useState(false);
+  const lastMailbox = useRef<Mailbox | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const onComposerState = useCallback((open: boolean, dirty: boolean) => { composerOpen.current = open; composerDirty.current = dirty; setHasComposer(open); }, []);
   const [mailboxes, setMailboxes] = useState<Mailbox[]>([]);
   const [selected, setSelected] = useState('');
   const [view, setView] = useState<'inbox' | 'addresses' | 'reading'>('inbox');
@@ -56,8 +64,13 @@ export function SsoWorkspace({ attachmentConfig }: { attachmentConfig?: Attachme
       const current = await sessionRequest<UserSession>('/auth/session', { signal: activeSignal });
       if (activeSignal.aborted) return;
       const principalId = current.actor?.principalId ?? null;
+      if (!current.actor && composerOpen.current && sessionRef.current?.actor) {
+        setSessionExpired(true); setError('Your session expired. The open draft is preserved in this tab. Sign in in another tab, then refresh your session.'); return;
+      }
+      setSessionExpired(false);
       if (preferencePrincipal.current !== principalId) {
         preferenceController.current?.abort(); setPreferences(null); setPreferenceError('');
+        composerOpen.current = false; composerDirty.current = false; setHasComposer(false); lastMailbox.current = null;
         if (preferencePrincipal.current !== null) clearAttachmentAccessCache();
         setMailboxes([]); setSelected('');
         preferencePrincipal.current = principalId;
@@ -95,6 +108,7 @@ export function SsoWorkspace({ attachmentConfig }: { attachmentConfig?: Attachme
   }, [reload]);
   async function logout() {
     if (!session?.csrfToken) return;
+    if (composerDirty.current && !window.confirm('Sign out with unsaved draft changes? Only the last saved version will be recoverable.')) return;
     try {
       const result = await sessionRequest<{ logoutUrl: string }>('/auth/logout', { method: 'POST', csrfToken: session.csrfToken });
       navigating.current = true; setRedirecting(true);
@@ -107,6 +121,8 @@ export function SsoWorkspace({ attachmentConfig }: { attachmentConfig?: Attachme
   if (loading) return <main className="connection-page"><section className="connection-card"><h1>DreamPost</h1><p>Loading your account…</p></section></main>;
   if (!session?.actor) return <main className="connection-page"><section className="connection-card"><p className="eyebrow">Local mail, in your hands</p><h1>{error ? 'Unable to sign you in' : 'Sign-in is not ready'}</h1>{error ? <p className="error-panel" role="alert">{error}</p> : <p role="status">Your administrator needs to finish connecting DreamSSO.</p>}<button className="button primary" onClick={() => void reload()}>Try again</button></section></main>;
   const mailbox = mailboxes.find(item => item.id === selected);
+  if (mailbox) lastMailbox.current = mailbox;
+  const workspaceMailbox = mailbox ?? (hasComposer ? lastMailbox.current : null);
   const name = session.profile?.display_name || session.actor.username;
   const accountUrl = session.accountPortalUrl && /^https?:\/\//.test(session.accountPortalUrl) ? session.accountPortalUrl : null;
   return <div className="app-shell">
@@ -115,6 +131,7 @@ export function SsoWorkspace({ attachmentConfig }: { attachmentConfig?: Attachme
       <div className="profile-entry" ref={profileRef}><button className="profile-button" aria-label="Account menu" aria-expanded={profileOpen} onClick={() => setProfileOpen(value => !value)}>{name.slice(0, 1).toUpperCase()}</button>{profileOpen && <div className="profile-popover" onKeyDown={event => { if (event.key === 'Escape') setProfileOpen(false); }}><strong>{name}</strong>{session.profile?.email && <span>{session.profile.email}</span>}{accountUrl && <a href={accountUrl} target="_blank" rel="noreferrer">View account</a>}<button className="button subtle" onClick={() => { setView('reading'); setProfileOpen(false); }}>Reading settings</button><button className="button subtle" onClick={() => void logout()}>Sign out</button></div>}</div>
     </div></header>
     {error && <div className="error-panel" role="alert">{error}<button className="text-button" onClick={() => void reload()}>Refresh session</button></div>}
-    {view === 'reading' ? <ReadingSettings key={session.actor.principalId} preferences={preferences} csrfToken={session.csrfToken ?? ''} error={preferenceError} onReload={() => void reloadPreferences(session.actor!.principalId)} onChanged={value => { preferenceController.current?.abort(); setPreferences(value); setPreferenceError(''); }} /> : view === 'addresses' ? <AddressSettings session={session} onChanged={() => void reload()} /> : mailbox ? <Inbox key={`${session.actor.principalId}:${mailbox.id}`} session={{ token: '', mailbox, csrfToken: session.csrfToken ?? undefined }} attachmentConfig={attachmentConfig} autoLoadExternalImages={preferences?.autoLoadExternalImages ?? false} /> : <main className="settings-page"><h1>Your mailbox</h1><p>No mailbox is available yet. Open Addresses to review your access or request an address.</p><button className="button primary" onClick={() => setView('addresses')}>Manage addresses</button></main>}
+    {view === 'reading' ? <ReadingSettings key={session.actor.principalId} preferences={preferences} csrfToken={session.csrfToken ?? ''} error={preferenceError} onReload={() => void reloadPreferences(session.actor!.principalId)} onChanged={value => { preferenceController.current?.abort(); setPreferences(value); setPreferenceError(''); }} /> : view === 'addresses' ? <AddressSettings session={session} onChanged={() => void reload()} /> : mailbox ? everydayMail ? null : <Inbox key={`${session.actor.principalId}:${mailbox.id}`} session={{ token: '', mailbox, csrfToken: session.csrfToken ?? undefined }} attachmentConfig={attachmentConfig} autoLoadExternalImages={preferences?.autoLoadExternalImages ?? false} /> : <main className="settings-page"><h1>Your mailbox</h1><p>No mailbox is available yet. Open Addresses to review your access or request an address.</p><button className="button primary" onClick={() => setView('addresses')}>Manage addresses</button></main>}
+    {everydayMail && workspaceMailbox && <MailboxWorkspace key={session.actor.principalId} mailbox={workspaceMailbox} accessibleMailboxIds={mailboxes.map(box => box.id)} csrf={session.csrfToken ?? ''} permissions={session.actor.permissions} active={!sessionExpired && !!mailbox} visible={view === 'inbox' && !!mailbox} outbound={outbound} attachmentConfig={attachmentConfig} autoLoadExternalImages={preferences?.autoLoadExternalImages ?? false} onComposerState={onComposerState} />}
   </div>;
 }
