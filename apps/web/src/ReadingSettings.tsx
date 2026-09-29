@@ -23,7 +23,7 @@ export function ReadingSettings({ preferences, csrfToken, error, onReload, onCha
     } catch (failure) { if (!attempt.signal.aborted) setSaveError(errorMessage(failure)); }
     finally { if (!attempt.signal.aborted) setSaving(false); }
   }
-  return <main className="settings-page">
+  return <main className="settings-page page-enter">
     <div className="settings-heading"><div><p className="eyebrow">Personal preferences</p><h1>Reading settings</h1><p>These settings apply only to you, including when you read a shared mailbox.</p></div></div>
     {error && <div className="error-panel" role="alert">{error} External images stay blocked until your preference can be loaded.<button className="text-button" onClick={onReload}>Try again</button></div>}
     <section className="settings-card" aria-labelledby="external-images-heading"><h2 id="external-images-heading">External images</h2>

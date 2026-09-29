@@ -5,6 +5,9 @@ import type { OutboundConfig } from './compose/api';
 import { errorMessage, getMailboxes, getReadingPreferences, sessionRequest, type Mailbox, type ReadingPreferences } from './api';
 import { AddressSettings } from './AddressSettings';
 import { ReadingSettings } from './ReadingSettings';
+import { PostmasterWorkspace, canOpenPostmaster } from './PostmasterWorkspace';
+import { MotionPresence } from './MotionPresence';
+import { workspacePaths, workspaceView, type WorkspaceView } from './workspace-navigation';
 import { clearAttachmentAccessCache, type AttachmentConfig } from './attachments/api';
 
 export interface UserSession {
@@ -25,7 +28,18 @@ export function SsoWorkspace({ attachmentConfig, everydayMail = false, outbound 
   const onComposerState = useCallback((open: boolean, dirty: boolean) => { composerOpen.current = open; composerDirty.current = dirty; setHasComposer(open); }, []);
   const [mailboxes, setMailboxes] = useState<Mailbox[]>([]);
   const [selected, setSelected] = useState('');
-  const [view, setView] = useState<'inbox' | 'addresses' | 'reading'>('inbox');
+  const [view, setView] = useState<WorkspaceView>(() => workspaceView(window.location.pathname));
+  const viewRef = useRef(view); viewRef.current = view;
+  const navigate = useCallback((next: WorkspaceView, replace = false) => {
+    const path = workspacePaths[next];
+    if (window.location.pathname !== path) window.history[replace ? 'replaceState' : 'pushState'](null, '', path);
+    setView(next); setProfileOpen(false);
+  }, []);
+  useEffect(() => {
+    const restore = () => { setView(workspaceView(window.location.pathname)); setProfileOpen(false); };
+    window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, []);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -51,7 +65,7 @@ export function SsoWorkspace({ attachmentConfig, everydayMail = false, outbound 
   useEffect(() => {
     if (!profileOpen) return;
     const click = (event: PointerEvent) => { if (!profileRef.current?.contains(event.target as Node)) setProfileOpen(false); };
-    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setProfileOpen(false); };
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); setProfileOpen(false); profileRef.current?.querySelector<HTMLButtonElement>('.profile-button')?.focus(); } };
     document.addEventListener('pointerdown', click); document.addEventListener('keydown', key);
     return () => { document.removeEventListener('pointerdown', click); document.removeEventListener('keydown', key); };
   }, [profileOpen]);
@@ -82,21 +96,21 @@ export function SsoWorkspace({ attachmentConfig, everydayMail = false, outbound 
         if (current.catalog.syncedAt && !navigating.current) {
           navigating.current = true;
           setRedirecting(true);
-          window.location.replace('/auth/login');
+          window.location.replace(`/auth/login?returnTo=${encodeURIComponent(workspacePaths[viewRef.current])}`);
         }
         return;
       }
       void reloadPreferences(current.actor.principalId);
-      if (!current.actor.permissions.includes('mailbox.use')) { setMailboxes([]); setSelected(''); setView(currentView => currentView === 'reading' ? 'reading' : 'addresses'); setError(''); return; }
+      if (!current.actor.permissions.includes('mailbox.use')) { setMailboxes([]); setSelected(''); if (viewRef.current === 'inbox') navigate('reading', true); setError(''); return; }
       const boxes = await getMailboxes(activeSignal);
       if (activeSignal.aborted) return;
       setMailboxes(boxes);
-      if (boxes.length && !boxes[0]?.address) setView('addresses');
+      if (boxes.length && !boxes[0]?.address && viewRef.current === 'inbox') navigate('addresses', true);
       setSelected(previous => boxes.some(box => box.id === previous) ? previous : boxes[0]?.id ?? '');
       setError('');
     } catch (failure) { if (!activeSignal.aborted) { navigating.current = false; setRedirecting(false); setError(errorMessage(failure)); } }
     finally { if (!activeSignal.aborted) setLoading(false); }
-  }, [reloadPreferences]);
+  }, [reloadPreferences, navigate]);
   useEffect(() => {
     const controller = new AbortController(); void reload(controller.signal);
     return () => controller.abort();
@@ -125,13 +139,20 @@ export function SsoWorkspace({ attachmentConfig, everydayMail = false, outbound 
   const workspaceMailbox = mailbox ?? (hasComposer ? lastMailbox.current : null);
   const name = session.profile?.display_name || session.actor.username;
   const accountUrl = session.accountPortalUrl && /^https?:\/\//.test(session.accountPortalUrl) ? session.accountPortalUrl : null;
-  return <div className="app-shell">
-    <header className="app-header"><div className="brand">DreamPost</div><nav className="workspace-tabs" aria-label="Workspace"><button className={`button subtle ${view === 'inbox' ? 'selected-tab' : ''}`} disabled={!session.actor.permissions.includes('mailbox.use')} onClick={() => setView('inbox')}>Mail</button><button className={`button subtle ${view === 'addresses' ? 'selected-tab' : ''}`} onClick={() => setView('addresses')}>Addresses</button></nav><div className="header-actions">
+  const inConsole = view === 'postmaster';
+  const inSettings = view === 'reading' || view === 'addresses';
+  return <div className={`app-shell ${inConsole ? 'admin-workspace' : 'personal-workspace'}`}>
+    {!inConsole && <header className="app-header"><div className="brand">DreamPost</div><nav className="workspace-tabs" aria-label="Workspace"><button className={`button subtle ${view === 'inbox' ? 'selected-tab' : ''}`} aria-current={view === 'inbox' ? 'page' : undefined} disabled={!session.actor.permissions.includes('mailbox.use')} onClick={() => navigate('inbox')}>Mail</button><button className={`button subtle ${inSettings ? 'selected-tab' : ''}`} aria-current={inSettings ? 'page' : undefined} onClick={() => navigate('reading')}>Settings</button></nav><div className="header-actions">
       {mailboxes.length > 1 && <select aria-label="Mailbox" value={selected} onChange={event => setSelected(event.target.value)}>{mailboxes.map(box => <option key={box.id} value={box.id}>{box.name}</option>)}</select>}
-      <div className="profile-entry" ref={profileRef}><button className="profile-button" aria-label="Account menu" aria-expanded={profileOpen} onClick={() => setProfileOpen(value => !value)}>{name.slice(0, 1).toUpperCase()}</button>{profileOpen && <div className="profile-popover" onKeyDown={event => { if (event.key === 'Escape') setProfileOpen(false); }}><strong>{name}</strong>{session.profile?.email && <span>{session.profile.email}</span>}{accountUrl && <a href={accountUrl} target="_blank" rel="noreferrer">View account</a>}<button className="button subtle" onClick={() => { setView('reading'); setProfileOpen(false); }}>Reading settings</button><button className="button subtle" onClick={() => void logout()}>Sign out</button></div>}</div>
-    </div></header>
+      <div className="profile-entry" ref={profileRef}><button className="profile-button" aria-label="Account menu" aria-expanded={profileOpen} onClick={() => setProfileOpen(value => !value)}>{name.slice(0, 1).toUpperCase()}</button><MotionPresence open={profileOpen} className="profile-presence"><div className="profile-popover"><strong>{name}</strong>{session.profile?.email && <span>{session.profile.email}</span>}{accountUrl && <a href={accountUrl} target="_blank" rel="noreferrer">View account</a>}<button className="button subtle" onClick={() => navigate('reading')}>Personal settings</button><button className="button subtle" onClick={() => void logout()}>Sign out</button></div></MotionPresence></div>
+    </div></header>}
     {error && <div className="error-panel" role="alert">{error}<button className="text-button" onClick={() => void reload()}>Refresh session</button></div>}
-    {view === 'reading' ? <ReadingSettings key={session.actor.principalId} preferences={preferences} csrfToken={session.csrfToken ?? ''} error={preferenceError} onReload={() => void reloadPreferences(session.actor!.principalId)} onChanged={value => { preferenceController.current?.abort(); setPreferences(value); setPreferenceError(''); }} /> : view === 'addresses' ? <AddressSettings session={session} onChanged={() => void reload()} /> : mailbox ? everydayMail ? null : <Inbox key={`${session.actor.principalId}:${mailbox.id}`} session={{ token: '', mailbox, csrfToken: session.csrfToken ?? undefined }} attachmentConfig={attachmentConfig} autoLoadExternalImages={preferences?.autoLoadExternalImages ?? false} /> : <main className="settings-page"><h1>Your mailbox</h1><p>No mailbox is available yet. Open Addresses to review your access or request an address.</p><button className="button primary" onClick={() => setView('addresses')}>Manage addresses</button></main>}
-    {everydayMail && workspaceMailbox && <MailboxWorkspace key={session.actor.principalId} mailbox={workspaceMailbox} accessibleMailboxIds={mailboxes.map(box => box.id)} csrf={session.csrfToken ?? ''} permissions={session.actor.permissions} active={!sessionExpired && !!mailbox} visible={view === 'inbox' && !!mailbox} outbound={outbound} attachmentConfig={attachmentConfig} autoLoadExternalImages={preferences?.autoLoadExternalImages ?? false} onComposerState={onComposerState} />}
+    {inConsole ? <PostmasterWorkspace key={session.actor.principalId} active={!sessionExpired} session={session} onBack={() => navigate(session.actor!.permissions.includes('mailbox.use') ? 'inbox' : 'reading')} onChanged={() => void reload()} /> : inSettings ? <div className="personal-settings-layout page-enter">
+      <aside className="settings-sidebar"><p className="sidebar-label">Personal settings</p><nav aria-label="Personal settings"><button className={`folder-button ${view === 'reading' ? 'active' : ''}`} aria-current={view === 'reading' ? 'page' : undefined} onClick={() => navigate('reading')}>Reading</button><button className={`folder-button ${view === 'addresses' ? 'active' : ''}`} aria-current={view === 'addresses' ? 'page' : undefined} onClick={() => navigate('addresses')}>Addresses</button></nav>{canOpenPostmaster(session) && <div className="administration-entry"><p>Administration</p><button className="button" onClick={() => navigate('postmaster')}>Open Postmaster <span aria-hidden="true">↗</span></button><small>Open the separate mail service console.</small></div>}</aside>
+      {view === 'reading' ? <ReadingSettings key={session.actor.principalId} preferences={preferences} csrfToken={session.csrfToken ?? ''} error={preferenceError} onReload={() => void reloadPreferences(session.actor!.principalId)} onChanged={value => { preferenceController.current?.abort(); setPreferences(value); setPreferenceError(''); }} /> : <AddressSettings key={session.actor.principalId} session={session} onChanged={() => void reload()} />}
+    </div> : mailbox ? everydayMail ? null : <Inbox key={`${session.actor.principalId}:${mailbox.id}`} session={{ token: '', mailbox, csrfToken: session.csrfToken ?? undefined }} attachmentConfig={attachmentConfig} autoLoadExternalImages={preferences?.autoLoadExternalImages ?? false} /> : <main className="settings-page page-enter"><h1>Your mailbox</h1><p>No mailbox is available yet. Open your address settings to review your access or request an address.</p><button className="button primary" onClick={() => navigate('addresses')}>Manage addresses</button></main>}
+    <div className="mail-workspace-host" hidden={inConsole}>
+      {everydayMail && workspaceMailbox && <MailboxWorkspace key={session.actor.principalId} mailbox={workspaceMailbox} accessibleMailboxIds={mailboxes.map(box => box.id)} csrf={session.csrfToken ?? ''} permissions={session.actor.permissions} active={!sessionExpired && !!mailbox} visible={view === 'inbox' && !!mailbox} outbound={outbound} attachmentConfig={attachmentConfig} autoLoadExternalImages={preferences?.autoLoadExternalImages ?? false} onComposerState={onComposerState} />}
+    </div>
   </div>;
 }
