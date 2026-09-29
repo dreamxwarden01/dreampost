@@ -129,6 +129,7 @@ export function RecipientField({ label, values, onChange, disabled, actions, aut
 
   return <div className="recipient-field" id={`compose-${label.toLowerCase()}-row`} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) select(null); }}>
     <label htmlFor={`compose-${label.toLowerCase()}`}>{label}</label>
+    <div className="recipient-field-input">
     <div className="recipient-chips" onClick={focusInput}>
       {values.map((value, index) => activePending?.index === index ? null : <span className={`recipient-chip${activeSelected?.index === index ? ' is-selected' : ''}`} key={index} title={value.address}>
         <button ref={node => { if (node) chipButtons.current.set(index, node); else chipButtons.current.delete(index); }} className="recipient-chip-select" type="button" disabled={disabled} tabIndex={activeSelected?.index === index ? 0 : -1} aria-label={activeSelected?.index === index ? `${value.name ? `${value.name} <${value.address}>` : value.address || '(Empty address)'}, selected` : undefined} aria-describedby={keyboardHintId} onFocus={() => select({ index, ...value })} onClick={event => { event.stopPropagation(); focusChip(index); }} onKeyDown={event => chipKeyDown(event, index)}>{value.name ? `${value.name} <${value.address}>` : value.address || '(Empty address)'}</button>
@@ -139,6 +140,7 @@ export function RecipientField({ label, values, onChange, disabled, actions, aut
         onCompositionStart={() => { composing.current = true; }} onCompositionEnd={event => { composing.current = false; change(event.currentTarget.value); }} />
     </div>
     {actions && <div className="recipient-field-actions">{actions}</div>}
+    </div>
     <span className="sr-only" id={keyboardHintId}>When the input is empty, Backspace or Left Arrow selects the previous recipient. With a recipient selected, Backspace or Delete removes it. Left and Right Arrow move between recipients; Escape returns to the input.</span>
     <span className="sr-only recipient-removal-status" role="status" aria-live="polite" aria-atomic="true"><span key={announcement.revision}>{announcement.text}</span></span>
   </div>;

@@ -52,8 +52,8 @@ const web = createServer((request, response) => {
   if (!file) { response.writeHead(404).end(); return; }
   void readFile(file).then(bytes => response.writeHead(200, { 'Content-Type': spa ? 'text/html' : path.endsWith('.css') ? 'text/css' : 'text/javascript', 'Cache-Control': 'no-store' }).end(bytes)).catch(() => response.writeHead(404).end());
 });
-async function check(name: string, work: () => Promise<void>) { if (only && !name.includes(only)) return; try { await work(); checks.push({ name, status: 'passed' }); console.log(`PASS ${name}`); } catch (failure) { checks.push({ name, status: 'failed', error: failure instanceof Error ? failure.message : 'Unknown' }); throw failure; } }
-async function saveScreenshot(page: Page, filename: string, fullPage = false) {
+async function check(name: string, work: () => Promise<void>) { if (only && !name.toLowerCase().includes(only.toLowerCase())) return; try { await work(); checks.push({ name, status: 'passed' }); console.log(`PASS ${name}`); } catch (failure) { checks.push({ name, status: 'failed', error: failure instanceof Error ? failure.message : 'Unknown' }); throw failure; } }
+async function settleAnimations(page: Page) {
   await page.evaluate(async () => {
     for (let pass = 0; pass < 5; pass++) {
       await new Promise<void>(done => requestAnimationFrame(() => requestAnimationFrame(() => done())));
@@ -67,7 +67,9 @@ async function saveScreenshot(page: Page, filename: string, fullPage = false) {
     }
     throw new Error('UI continued starting finite animations before screenshot');
   });
-  await page.screenshot({ path: join(output, filename), fullPage });
+}
+async function saveScreenshot(page: Page, filename: string, fullPage = false) {
+  await settleAnimations(page); await page.screenshot({ path: join(output, filename), fullPage });
 }
 async function until(predicate: () => Promise<boolean> | boolean, label: string, timeout = 10000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { if (await predicate()) return; await new Promise(done => setTimeout(done, 50)); } throw new Error(`Timed out: ${label}`); }
 async function search(page: Page, query: string) {
@@ -78,6 +80,46 @@ async function search(page: Page, query: string) {
   await until(async () => await page.locator('.list-panel[aria-busy="false"]').count() > 0, 'search completed');
 }
 async function folder(page: Page, name: string) { await page.locator('.mail-folders').getByRole('button', { name, exact: true }).click(); await until(async () => await page.locator('.list-panel[aria-busy="false"]').count() > 0, 'folder loaded'); }
+interface BrowserFile { name: string; content?: string; size?: number; type?: string; directory?: boolean }
+async function transferFiles(page: Page, files: BrowserFile[], textValue?: string) {
+  const handle = await page.evaluateHandle(({ files, textValue }) => {
+    const transfer = new DataTransfer();
+    if (textValue !== undefined) transfer.setData('text/plain', textValue);
+    for (const file of files) {
+      transfer.items.add(new File([file.content ?? new Uint8Array(file.size ?? 1).fill(65)], file.name, { type: file.type ?? 'application/octet-stream' }));
+    }
+    Object.defineProperty(transfer, '__fixtureDirectoryNames', { value: files.filter(file => file.directory).map(file => file.name) });
+    return transfer;
+  }, { files, textValue });
+  return handle;
+}
+async function dispatchDrag(page: Page, selector: string, type: string, transfer: Awaited<ReturnType<typeof transferFiles>>) {
+  return page.evaluate(({ selector, type, transfer }) => {
+    const target = selector === 'window' ? window : document.querySelector(selector); if (!target) throw new Error(`Missing drag target ${selector}`);
+    const directories = (transfer as DataTransfer & { __fixtureDirectoryNames?: string[] }).__fixtureDirectoryNames ?? [];
+    const prototype = DataTransferItem.prototype, descriptor = Object.getOwnPropertyDescriptor(prototype, 'webkitGetAsEntry'), original = prototype.webkitGetAsEntry;
+    // Native item access may return fresh wrappers. Scope the directory shim to this synchronous drop only.
+    const entry = { webkitGetAsEntry(this: DataTransferItem) { if (directories.includes(this.getAsFile()?.name ?? '')) return { isDirectory: true, isFile: false }; return original.call(this); } };
+    const patched = type === 'drop' && directories.length > 0;
+    if (patched) Object.defineProperty(prototype, 'webkitGetAsEntry', { ...descriptor, value: entry.webkitGetAsEntry });
+    try {
+      if (patched && !directories.every(name => Array.from(transfer.items).some(item => item.getAsFile()?.name === name && item.webkitGetAsEntry()?.isDirectory))) throw new Error('Synthetic directory entry was not visible on the actual item access path');
+      const event = new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer }); target.dispatchEvent(event);
+      return { prevented: event.defaultPrevented, dropEffect: transfer.dropEffect };
+    } finally { if (patched && descriptor) Object.defineProperty(prototype, 'webkitGetAsEntry', descriptor); }
+  }, { selector, type, transfer });
+}
+
+async function openPostmaster(opener: Page): Promise<Page> {
+  const link = opener.getByRole('link', { name: 'Open Postmaster', exact: false });
+  assert.equal(await link.getAttribute('target'), '_blank');
+  const rel = (await link.getAttribute('rel') ?? '').split(/\s+/); assert(rel.includes('noopener') && rel.includes('noreferrer'));
+  const [popup] = await Promise.all([opener.context().waitForEvent('page'), link.click()]);
+  popup.on('pageerror', failure => consoleErrors.push(failure.message));
+  await popup.waitForLoadState('domcontentloaded'); await popup.getByRole('heading', { name: 'Postmaster', exact: true }).waitFor();
+  assert(await popup.evaluate(() => window.opener === null && window.top === window));
+  return popup;
+}
 async function waitSaved(page: Page) { await until(async () => await page.locator('.composer-header [role=status]').textContent() === 'Saved', 'draft saved'); }
 async function closeCompose(page: Page) { await page.getByRole('button', { name: 'Save and close composer' }).click(); await page.locator('.composer').waitFor({ state: 'detached' }); }
 try {
@@ -285,6 +327,37 @@ try {
   });
 
   await check('Conversation expansion uses exact message source and a blank separated reply', async () => { await search(page, 'Trip planning'); await page.getByLabel('Mail list layout', { exact: true }).selectOption('threads'); await until(async () => await page.locator('.message-list > li').count() === 1, 'thread grouping'); await page.locator('.message-list .message-item').click(); await page.getByRole('button', { name: 'Reply all', exact: true }).click(); await page.getByRole('region', { name: 'Compose message' }).waitFor(); assert.equal(await page.getByRole('textbox', { name: 'Message body', exact: true }).inputValue(), ''); assert.equal(await page.getByRole('button', { name: 'Show quoted message', exact: true }).getAttribute('aria-expanded'), 'false'); assert((await page.locator('#compose-to-row').innerText()).includes('reply@example.test')); await page.getByRole('textbox', { name: 'Message body', exact: true }).fill('A fresh reply, separate from the original.'); await waitSaved(page); await page.getByRole('button', { name: 'Minimize composer', exact: true }).click(); await page.getByRole('button', { name: 'Restore composer', exact: true }).click(); assert.equal(await page.getByRole('textbox', { name: 'Message body', exact: true }).inputValue(), 'A fresh reply, separate from the original.'); await page.getByRole('button', { name: 'Maximize composer', exact: true }).click(); await saveScreenshot(page, 'composer-expanded.png'); await page.getByRole('button', { name: 'Restore composer size', exact: true }).click(); await closeCompose(page); });
+  await check('Composer focus underlines only input areas without rectangular control outlines on desktop and mobile', async () => {
+    await page.bringToFront();
+    await page.getByRole('button', { name: 'Compose', exact: true }).first().click(); await page.getByRole('region', { name: 'Compose message', exact: true }).waitFor();
+    const fields = [
+      { input: '#compose-from', row: '.composer-from', area: '.composer-from .composer-field-input' },
+      { input: '#compose-to', row: '#compose-to-row', area: '#compose-to-row .recipient-field-input' },
+      { input: '#compose-subject', row: '.composer-subject', area: '.composer-subject .composer-field-input' },
+    ];
+    const verify = async () => {
+      for (const field of fields) {
+        await page.locator(field.input).focus(); await settleAnimations(page);
+        const result = await page.evaluate(field => {
+          const styles = [];
+          for (const selector of [field.input, field.row, `${field.row} > label`, field.area]) { const node = document.querySelector(selector); if (!node) throw new Error(`Missing focus target ${selector}`); const style = getComputedStyle(node); styles.push({ outline: style.outlineStyle, outlineWidth: style.outlineWidth, shadow: style.boxShadow, top: style.borderTopWidth, right: style.borderRightWidth, bottom: style.borderBottomWidth, left: style.borderLeftWidth }); }
+          return { control: styles[0]!, row: styles[1]!, label: styles[2]!, area: styles[3]! };
+        }, field);
+        for (const outer of [result.control, result.row, result.label]) { assert.equal(outer.outline, 'none', JSON.stringify({ field, result })); assert.equal(outer.shadow, 'none'); for (const border of [outer.top, outer.right, outer.bottom, outer.left]) assert.equal(border, '0px'); }
+        assert.equal(result.area.bottom, '1px'); assert.equal(result.area.top, '0px'); assert.equal(result.area.left, '0px'); assert.equal(result.area.right, '0px');
+        assert(/0px 1px 0px 0px$/.test(result.area.shadow), `Expected only an underline shadow: ${result.area.shadow}`);
+      }
+      const geometry = await page.evaluate(() => {
+        const target = document.querySelector('.composer-drop-target')!.getBoundingClientRect(), body = document.querySelector('.composer-body')!.getBoundingClientRect(), footer = document.querySelector('.composer-footer')!.getBoundingClientRect();
+        return { gap: footer.top - target.bottom, bodyGap: target.bottom - body.bottom, padding: parseFloat(getComputedStyle(document.querySelector('.composer-scroll')!).paddingBottom) };
+      });
+      assert(geometry.gap >= -1 && geometry.gap <= geometry.padding + 2, `Unquoted body must reach footer padding: ${JSON.stringify(geometry)}`); assert(Math.abs(geometry.bodyGap) <= 2, 'Editable textarea must fill its drop target');
+    };
+    await verify(); await page.locator('#compose-to').focus(); await saveScreenshot(page, 'composer-input-focus-desktop.png');
+    await page.setViewportSize({ width: 390, height: 844 }); await verify(); await page.locator('#compose-subject').focus(); assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)); await saveScreenshot(page, 'composer-input-focus-mobile.png');
+    await closeCompose(page); await page.setViewportSize({ width: 1440, height: 1000 });
+  });
+
   await check('Recipient fields reveal Cc/Bcc on demand and committed chips preserve names through keyboard and IME interaction', async () => {
     await page.getByRole('button', { name: 'Compose', exact: true }).first().click(); const to = page.getByRole('textbox', { name: 'To', exact: true });
     await page.getByRole('region', { name: 'Compose message', exact: true }).waitFor(); await page.waitForTimeout(200); await saveScreenshot(page, 'composer-compact-recipients.png');
@@ -346,19 +419,28 @@ try {
   });
   await check('Live invalidation reaches the browser without foreground idle-renewal headers', async () => { await folder(page, 'Inbox'); await search(page, 'Live update fixture'); const before = requests.length; await addMessage('Live update fixture'); await until(async () => await page.locator('.mail-list-row').count() === 1, 'SSE invalidation', 12000); assert(requests.slice(before).some(r => r.path.endsWith('/messages') && r.background === '1')); });
   await check('Second identity sees shared history with independent read/star state', async () => { second = await browserContext(bob); const otherPage = await second.newPage(); await otherPage.goto(origin); await otherPage.getByRole('heading', { name: 'Inbox', exact: true }).waitFor(); await otherPage.getByLabel('Mailbox', { exact: true }).selectOption(box.id); await search(otherPage, 'Invoice'); assert(await otherPage.getByRole('button', { name: 'Star Invoice 中文测试', exact: true }).count()); assert.equal((await pool.query('SELECT is_starred FROM principal_message_flags WHERE message_id=$1 AND principal_id=$2', [chinese, bob.id])).rows[0]?.is_starred ?? false, false); assert.equal(await otherPage.getByRole('button', { name: 'Manage', exact: true }).count(), 0); await second.close(); second = undefined; });
-  await check('Personal settings and Postmaster have separate routes, requests and history while preserving the hidden composer', async () => {
+  await check('Personal settings open Postmaster in an independent top-level tab and preserve the original draft', async () => {
     await page.getByRole('button', { name: 'Compose', exact: true }).first().click(); await page.getByRole('textbox', { name: 'Subject', exact: true }).fill('Console navigation fixture'); await page.getByRole('textbox', { name: 'Message body', exact: true }).fill('Preserve this exact draft across administration.'); await waitSaved(page);
     const start = requests.length; await page.getByRole('button', { name: 'Account menu', exact: true }).click();
-    assert.equal(await page.locator('.profile-popover').getByRole('button', { name: 'Open Postmaster', exact: false }).count(), 0);
+    assert.equal(await page.locator('.profile-popover').getByRole('link', { name: 'Open Postmaster', exact: false }).count(), 0);
     await page.locator('.profile-popover').getByRole('button', { name: 'Personal settings', exact: true }).click(); await page.getByRole('heading', { name: 'Reading settings', exact: true }).waitFor(); assert.equal(new URL(page.url()).pathname, '/settings/reading'); await saveScreenshot(page, 'personal-settings-desktop.png');
     await page.getByRole('navigation', { name: 'Personal settings', exact: true }).getByRole('button', { name: 'Addresses', exact: true }).click(); await page.getByRole('heading', { name: 'Your addresses', exact: true }).waitFor(); assert.equal(new URL(page.url()).pathname, '/settings/addresses');
     assert.equal(await page.getByRole('heading', { name: 'Manage addresses', exact: true }).count(), 0); assert.equal(requests.slice(start).filter(r => r.path.startsWith('/api/admin/')).length, 0);
     await page.goBack(); await page.getByRole('heading', { name: 'Reading settings', exact: true }).waitFor(); await page.goForward(); await page.getByRole('heading', { name: 'Your addresses', exact: true }).waitFor();
-    await page.getByRole('button', { name: 'Open Postmaster', exact: false }).click(); await page.getByRole('heading', { name: 'Postmaster', exact: true }).waitFor(); assert.equal(new URL(page.url()).pathname, '/postmaster');
-    assert.equal(await page.locator('.composer').count(), 1); assert.equal(await page.locator('.composer').isVisible(), false); assert.equal(await page.getByRole('button', { name: 'Account menu', exact: true }).count(), 0); assert.equal(await page.locator('.mailbox-sidebar:visible').count(), 0);
-    await page.getByRole('navigation', { name: 'Postmaster', exact: true }).getByRole('button', { name: 'Addresses', exact: true }).click(); await page.getByRole('heading', { name: 'Manage addresses', exact: true }).waitFor();
-    await until(async () => await page.locator('.admin-address-list > li').count() >= 2 && !await page.getByText('Loading address administration…', { exact: true }).count(), 'console data loaded'); assert(requests.slice(start).filter(r => r.path.startsWith('/api/admin/')).length >= 3); await saveScreenshot(page, 'postmaster-desktop.png');
-    await page.getByRole('button', { name: 'Back to mail', exact: true }).click(); assert.equal(new URL(page.url()).pathname, '/'); assert.equal(await page.getByRole('textbox', { name: 'Message body', exact: true }).inputValue(), 'Preserve this exact draft across administration.'); await closeCompose(page);
+    const originalUrl = page.url(); await page.evaluate(() => { (window as unknown as Record<string, unknown>).__originalComposer = document.querySelector('.composer'); });
+    const popup = await openPostmaster(page);
+    try {
+      assert.equal(new URL(popup.url()).pathname, '/postmaster'); assert.equal(page.url(), originalUrl);
+      assert.equal(await page.getByRole('textbox', { name: 'Message body', exact: true }).inputValue(), 'Preserve this exact draft across administration.');
+      assert(await page.evaluate(() => (window as unknown as Record<string, unknown>).__originalComposer === document.querySelector('.composer')));
+      assert.equal(await popup.locator('.composer').count(), 0); assert.equal(await popup.getByRole('button', { name: 'Account menu', exact: true }).count(), 0); assert.equal(await popup.locator('.mailbox-sidebar').count(), 0);
+      await popup.getByRole('navigation', { name: 'Postmaster', exact: true }).getByRole('button', { name: 'Addresses', exact: true }).click(); await popup.getByRole('heading', { name: 'Manage addresses', exact: true }).waitFor();
+      await until(async () => await popup.locator('.admin-address-list > li').count() >= 2 && !await popup.getByText('Loading address administration…', { exact: true }).count(), 'console data loaded'); assert(requests.slice(start).filter(r => r.path.startsWith('/api/admin/')).length >= 3); await saveScreenshot(popup, 'postmaster-desktop.png');
+      await popup.getByRole('button', { name: 'Back to mail', exact: true }).click(); await popup.getByRole('heading', { name: 'Inbox', exact: true }).waitFor(); assert.equal(new URL(popup.url()).pathname, '/'); assert.equal(page.url(), originalUrl);
+      await popup.goBack(); await popup.getByRole('heading', { name: 'Postmaster', exact: true }).waitFor(); await popup.reload(); await popup.getByRole('heading', { name: 'Postmaster', exact: true }).waitFor(); assert.equal(page.url(), originalUrl);
+    } finally { await popup.close(); }
+    await page.bringToFront(); assert.equal(await page.getByRole('textbox', { name: 'Message body', exact: true }).inputValue(), 'Preserve this exact draft across administration.'); await closeCompose(page);
+    await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Mail', exact: true }).click(); await page.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
     const direct = await context!.newPage();
     try {
       for (const [path, title] of [['/settings/reading', 'Reading settings'], ['/settings/addresses', 'Addresses'], ['/postmaster', 'Postmaster']]) {
@@ -371,36 +453,40 @@ try {
       await deniedPage.goto(origin + '/postmaster'); await deniedPage.getByRole('heading', { name: 'Administrative access required', exact: true }).waitFor();
       assert.equal(requests.slice(deniedStart).filter(r => r.path.startsWith('/api/admin/')).length, 0); assert.equal(await deniedPage.locator('.console-sidebar').count(), 0);
       await deniedPage.getByRole('button', { name: 'Return to mail', exact: true }).click(); await deniedPage.getByRole('heading', { name: 'Inbox', exact: true }).waitFor();
-      await deniedPage.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click(); assert.equal(await deniedPage.getByRole('button', { name: 'Open Postmaster', exact: false }).count(), 0);
+      await deniedPage.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click(); assert.equal(await deniedPage.getByRole('link', { name: 'Open Postmaster', exact: false }).count(), 0);
     } finally { await deniedContext.close(); }
   });
   for (const status of [403, 401] as const) await check(`Focused Postmaster mutation clears administrative data immediately after ${status} revocation`, async () => {
     const user = await consoleActor(`operator-${status}`, true), ctx = await browserContext(user), peer = await ctx.newPage();
-    let releaseSession!: () => void; const sessionGate = new Promise<void>(done => { releaseSession = done; });
+    let consolePage: Page | undefined; let releaseSession!: () => void; const sessionGate = new Promise<void>(done => { releaseSession = done; });
     try {
       await peer.goto(origin); await peer.getByRole('button', { name: 'Compose', exact: true }).first().click(); await peer.getByRole('textbox', { name: 'Message body', exact: true }).fill(`Retain operator ${status} draft`); await waitSaved(peer);
-      await peer.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click(); await peer.getByRole('button', { name: 'Open Postmaster', exact: false }).click();
+      await peer.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click(); consolePage = await openPostmaster(peer); const popup = consolePage;
+      // Only the synthetic login boundary is intercepted; mutation/session checks use the real API.
       let releaseInitial!: () => void; const initialGate = new Promise<void>(done => { releaseInitial = done; });
-      await peer.route(`${origin}/api/admin/addresses`, async route => { const response = await route.fetch(); await initialGate; await route.fulfill({ response }); });
+      await popup.route(`${origin}/api/admin/addresses`, async route => { const response = await route.fetch(); await initialGate; await route.fulfill({ response }); });
       try {
-        await peer.getByRole('navigation', { name: 'Postmaster', exact: true }).getByRole('button', { name: 'Addresses', exact: true }).click(); await peer.getByText('Loading address administration…', { exact: true }).waitFor();
-        assert.equal(await peer.getByText('No pending requests.', { exact: true }).count(), 0); assert.equal(await peer.locator('.admin-address-form').count(), 0);
-      } finally { releaseInitial(); await peer.unrouteAll({ behavior: 'wait' }); }
-      await until(async () => await peer.locator('.admin-address-list > li').count() >= 2, 'revocation fixture address data');
-      const row = peer.locator('.admin-address-list > li').filter({ has: peer.getByText('bob@example.test', { exact: true }) }); await row.getByRole('button', { name: 'Admin pause', exact: true }).waitFor();
+        await popup.getByRole('navigation', { name: 'Postmaster', exact: true }).getByRole('button', { name: 'Addresses', exact: true }).click(); await popup.getByText('Loading address administration…', { exact: true }).waitFor();
+        assert.equal(await popup.getByText('No pending requests.', { exact: true }).count(), 0); assert.equal(await popup.locator('.admin-address-form').count(), 0);
+      } finally { releaseInitial(); await popup.unrouteAll({ behavior: 'wait' }); }
+      await until(async () => await popup.locator('.admin-address-list > li').count() >= 2, 'revocation fixture address data');
+      const row = popup.locator('.admin-address-list > li').filter({ has: popup.getByText('bob@example.test', { exact: true }) }); await row.getByRole('button', { name: 'Admin pause', exact: true }).waitFor();
       // Hold the automatic session refresh response: the mutation's own failure must clear the view first.
-      await peer.route(`${origin}/auth/session`, async route => { const response = await route.fetch(); await sessionGate; await route.fulfill({ response }); });
+      if (status === 401) await popup.route(`${origin}/auth/login**`, route => route.fulfill({ status: 401, contentType: 'text/html', body: '<h1>Synthetic sign-in boundary</h1>' }));
+      await popup.route(`${origin}/auth/session`, async route => { const response = await route.fetch(); await sessionGate; await route.fulfill({ response }); });
       if (status === 403) await pool.query("UPDATE auth_user_permission_overrides SET effect='deny' WHERE principal_id=$1 AND permission='addresses.manage'", [user.id]);
       else await pool.query("UPDATE auth_sessions SET expires_at=now()-interval '1 minute',idle_expires_at=now()-interval '1 minute' WHERE principal_id=$1", [user.id]);
-      const rejected = peer.waitForResponse(response => new URL(response.url()).pathname.endsWith('/admin-pause') && response.request().method() === 'PUT');
+      const rejected = popup.waitForResponse(response => new URL(response.url()).pathname.endsWith('/admin-pause') && response.request().method() === 'PUT');
       await row.getByRole('button', { name: 'Admin pause', exact: true }).click(); assert.equal((await rejected).status(), status);
-      await until(async () => await peer.locator('.admin-address-list > li').count() === 0 && await peer.getByRole('button', { name: 'Admin pause', exact: true }).count() === 0 && await peer.locator('.admin-address-form').count() === 0, 'immediate denial without session refresh');
+      await until(async () => await popup.locator('.admin-address-list > li').count() === 0 && await popup.getByRole('button', { name: 'Admin pause', exact: true }).count() === 0 && await popup.locator('.admin-address-form').count() === 0, 'immediate denial without session refresh');
       assert.equal((await pool.query("SELECT EXISTS(SELECT 1 FROM address_holds h WHERE h.allocation_id=a.id AND h.kind='admin' AND h.active) AS admin_paused FROM address_allocations a WHERE a.address='bob@example.test' AND a.ended_at IS NULL")).rows[0].admin_paused, false);
-      assert.equal(await peer.locator('.composer').count(), 1); assert.equal(await peer.locator('.composer').isVisible(), false);
+      assert.equal(await popup.locator('.composer').count(), 0);
       assert.equal(await peer.locator('.composer-body').inputValue(), `Retain operator ${status} draft`);
-      releaseSession(); await peer.getByRole('heading', { name: 'Administrative access required', exact: true }).waitFor(); await peer.getByRole('button', { name: 'Back to mail', exact: true }).click();
-      assert.equal(await peer.getByRole('textbox', { name: 'Message body', exact: true }).inputValue(), `Retain operator ${status} draft`);
-    } finally { releaseSession(); await ctx.close(); }
+      releaseSession();
+      if (status === 401) await popup.getByRole('heading', { name: 'Synthetic sign-in boundary', exact: true }).waitFor();
+      else await popup.getByRole('heading', { name: 'Administrative access required', exact: true }).waitFor();
+      await peer.bringToFront(); assert.equal(await peer.getByRole('textbox', { name: 'Message body', exact: true }).inputValue(), `Retain operator ${status} draft`);
+    } finally { releaseSession(); await consolePage?.unrouteAll({ behavior: 'wait' }).catch(() => {}); await ctx.close(); }
   });
   await check('An authorized admin without mailbox use manages addresses without fetching personal mail', async () => {
     const user = await consoleActor('console-only', false), ctx = await browserContext(user), peer = await ctx.newPage(); const personal: string[] = [];
@@ -441,6 +527,116 @@ try {
       assert.equal(await input.inputValue(), ''); assert.equal(await page.locator('#compose-to-row .recipient-chip').count(), 1); assert.deepEqual(await current(), [{ name: '', address: '入力@example.test' }]);
     } finally { release(); await page.unroute(target, delay); }
     await closeCompose(page);
+  });
+
+  await check('File drag awareness spans the window but only the message body accepts file drops', async () => {
+    await page.bringToFront();
+    await folder(page, 'Inbox'); await page.getByLabel('Mail list layout', { exact: true }).selectOption('messages'); await search(page, 'Trip planning'); await page.locator('.message-list .message-item').first().click(); await page.getByRole('button', { name: 'Reply', exact: true }).click();
+    await page.getByRole('textbox', { name: 'Subject', exact: true }).fill('File drop target fixture'); await waitSaved(page);
+    const uploads = () => requests.filter(request => request.method === 'POST' && /\/drafts\/[^/]+\/attachments$/.test(request.path)).length;
+    const before = uploads(), files = await transferFiles(page, [{ name: 'body-only.bin', content: 'Only the message body accepts this file.' }]);
+    try {
+      for (const target of ['.composer-header', '.app-header', '.composer-quote']) {
+        await dispatchDrag(page, 'window', 'dragenter', files); await page.locator('.composer-drop-overlay').waitFor();
+        assert.equal((await dispatchDrag(page, target, 'dragover', files)).prevented, true); assert.equal(await page.locator('.composer-drop-target.is-drop-allowed').count(), 0);
+        assert.equal((await dispatchDrag(page, target, 'drop', files)).prevented, true); await page.locator('.composer-drop-overlay').waitFor({ state: 'detached' }); assert.equal(uploads(), before);
+      }
+      const text = await transferFiles(page, [], 'Ordinary dragged text');
+      try { assert.equal((await dispatchDrag(page, '.composer-body', 'dragover', text)).prevented, false); assert.equal((await dispatchDrag(page, '.composer-body', 'drop', text)).prevented, false); assert.equal(await page.locator('.composer-drop-overlay').count(), 0); } finally { await text.dispose(); }
+      await dispatchDrag(page, 'window', 'dragenter', files); await page.locator('.composer-drop-overlay').waitFor(); await page.keyboard.press('Escape'); await page.locator('.composer-drop-overlay').waitFor({ state: 'detached' });
+      await dispatchDrag(page, 'window', 'dragenter', files); await page.locator('.composer-drop-overlay').waitFor(); await page.evaluate(() => window.dispatchEvent(new Event('blur'))); await page.locator('.composer-drop-overlay').waitFor({ state: 'detached' });
+      await page.getByRole('button', { name: 'Minimize composer', exact: true }).click(); assert.equal((await dispatchDrag(page, '.composer-minimized', 'drop', files)).prevented, true); assert.equal(uploads(), before); assert.equal(await page.locator('.composer-drop-overlay').count(), 0); await page.getByRole('button', { name: 'Restore composer', exact: true }).click();
+      await dispatchDrag(page, 'window', 'dragenter', files); await dispatchDrag(page, '.composer-body', 'dragover', files); await page.locator('.composer-drop-target.is-drop-allowed').waitFor(); await saveScreenshot(page, 'composer-file-drop-desktop.png');
+      await page.setViewportSize({ width: 390, height: 844 }); await dispatchDrag(page, 'window', 'dragenter', files); await dispatchDrag(page, '.composer-body', 'dragover', files); assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)); await saveScreenshot(page, 'composer-file-drop-mobile.png'); await page.setViewportSize({ width: 1440, height: 1000 });
+      assert.equal((await dispatchDrag(page, '.composer-body', 'drop', files)).prevented, true); await page.locator('.compose-attachments').getByText('body-only.bin', { exact: true }).waitFor(); await waitSaved(page); assert.equal(uploads(), before + 1);
+      assert(await page.evaluate(() => { const target = document.querySelector('.composer-drop-target')!; return !target.contains(document.querySelector('.composer-quote')) && !target.contains(document.querySelector('.compose-attachments')); }), 'Quoted context and attachment list remain outside the body drop target');
+      assert.equal(await page.locator('.composer-drop-overlay').count(), 0); assert.equal(await page.locator('.is-composer-file-dragging').count(), 0);
+      await dispatchDrag(page, 'window', 'dragenter', files); await page.locator('.composer-drop-overlay').waitFor(); await closeCompose(page); assert.equal(await page.locator('.is-composer-file-dragging').count(), 0);
+      await dispatchDrag(page, 'window', 'dragenter', files); assert.equal(await page.locator('.composer-drop-overlay').count(), 0); assert.equal(uploads(), before + 1);
+    } finally { await files.dispose(); }
+    await search(page, '');
+  });
+  await check('Multiple dropped files resume a lost-response retry at the exact current file without replaying the prefix', async () => {
+    await page.bringToFront();
+    await page.getByRole('button', { name: 'Compose', exact: true }).first().click(); await page.getByRole('textbox', { name: 'Subject', exact: true }).fill('File drop retry fixture'); await waitSaved(page);
+    const path = /\/api\/mailboxes\/[^/]+\/drafts\/[^/]+\/attachments$/;
+    const attempts: Array<{ name: string; key: string; version: string }> = [];
+    const intercept = async (route: import('playwright').Route) => {
+      if (route.request().method() !== 'POST') { await route.continue(); return; }
+      const headers = route.request().headers(), name = decodeURIComponent(headers['x-attachment-filename']!); attempts.push({ name, key: headers['x-mutation-key']!, version: headers['x-draft-version']! });
+      if (name === 'retry-middle.bin' && attempts.filter(attempt => attempt.name === name).length === 1) { const response = await route.fetch(); assert.equal(response.status(), 200); await route.abort('failed'); }
+      else await route.continue();
+    };
+    await page.route(path, intercept); const files = await transferFiles(page, [{ name: 'retry-first.bin', content: 'first' }, { name: 'retry-middle.bin', content: 'middle' }, { name: 'retry-last.bin', content: 'last' }]);
+    try {
+      await dispatchDrag(page, 'window', 'dragenter', files); await dispatchDrag(page, '.composer-body', 'dragover', files); await dispatchDrag(page, '.composer-body', 'drop', files); await page.getByRole('button', { name: 'Retry operation', exact: true }).waitFor();
+      assert.deepEqual(attempts.map(attempt => attempt.name), ['retry-first.bin', 'retry-middle.bin']);
+      const blocked = await transferFiles(page, [{ name: 'blocked-during-retry.bin', content: 'not queued' }]);
+      try { await dispatchDrag(page, '.composer-body', 'drop', blocked); assert.deepEqual(attempts.map(attempt => attempt.name), ['retry-first.bin', 'retry-middle.bin']); } finally { await blocked.dispose(); }
+      await page.getByRole('button', { name: 'Retry operation', exact: true }).click(); await page.locator('.compose-attachments').getByText('retry-last.bin', { exact: true }).waitFor(); await waitSaved(page);
+      assert.deepEqual(attempts.map(attempt => attempt.name), ['retry-first.bin', 'retry-middle.bin', 'retry-middle.bin', 'retry-last.bin']); assert.equal(attempts[1]!.key, attempts[2]!.key); assert.equal(attempts[1]!.version, attempts[2]!.version);
+      const stored = (await pool.query("SELECT a.id,a.filename,a.size_bytes FROM outbound_draft_attachments a JOIN outbound_drafts d ON d.id=a.draft_id WHERE d.subject='File drop retry fixture' ORDER BY a.created_at,a.id")).rows;
+      assert.deepEqual(stored.map((item: { filename: string }) => item.filename), ['retry-first.bin', 'retry-middle.bin', 'retry-last.bin']); assert.equal(new Set(stored.map((item: { id: string }) => item.id)).size, 3); assert.equal(await page.locator('.composer-drop-overlay').count(), 0);
+    } finally { await files.dispose(); await page.unroute(path, intercept); }
+    await closeCompose(page);
+  });
+  await check('An accepted file-drop batch continues after minimizing and backgrounding its composer', async () => {
+    await page.bringToFront(); await page.getByRole('button', { name: 'Compose', exact: true }).first().click(); await page.getByRole('textbox', { name: 'Subject', exact: true }).fill('Minimized accepted batch fixture'); await waitSaved(page);
+    let release!: () => void, started!: () => void; const gate = new Promise<void>(done => { release = done; }), firstCommitted = new Promise<void>(done => { started = done; });
+    const attempts: string[] = [], path = /\/api\/mailboxes\/[^/]+\/drafts\/[^/]+\/attachments$/;
+    const intercept = async (route: import('playwright').Route) => {
+      const name = decodeURIComponent(route.request().headers()['x-attachment-filename']!); attempts.push(name);
+      if (name === 'minimized-first.bin') { const response = await route.fetch(); started(); await gate; await route.fulfill({ response }); } else await route.continue();
+    };
+    await page.route(path, intercept); const files = await transferFiles(page, [{ name: 'minimized-first.bin', content: 'accepted first' }, { name: 'minimized-last.bin', content: 'accepted last' }]); let background: Page | undefined;
+    try {
+      await dispatchDrag(page, 'window', 'dragenter', files); await dispatchDrag(page, '.composer-body', 'dragover', files); await dispatchDrag(page, '.composer-body', 'drop', files); await firstCommitted;
+      await page.getByRole('button', { name: 'Minimize composer', exact: true }).click(); await page.getByRole('complementary', { name: 'Minimized composer', exact: true }).waitFor();
+      background = await context!.newPage(); await background.goto(origin + '/settings/reading'); await background.bringToFront(); release();
+      await until(async () => Number((await pool.query("SELECT count(*) FROM outbound_draft_attachments a JOIN outbound_drafts d ON d.id=a.draft_id WHERE d.subject='Minimized accepted batch fixture'")).rows[0].count) === 2, 'accepted batch finishes while minimized');
+      assert.deepEqual(attempts, ['minimized-first.bin', 'minimized-last.bin']); assert.equal(await page.locator('.composer').count(), 0);
+      await background.close(); background = undefined; await page.bringToFront(); await page.getByRole('button', { name: 'Restore composer', exact: true }).click(); await page.locator('.compose-attachments').getByText('minimized-last.bin', { exact: true }).waitFor(); await waitSaved(page);
+    } finally { release(); await files.dispose(); await background?.close(); await page.unroute(path, intercept); }
+    await closeCompose(page);
+  });
+
+  await check('File-drop directory, part-count and aggregate-byte limits reject the whole selection before uploading', async () => {
+    await page.bringToFront();
+    await page.getByRole('button', { name: 'Compose', exact: true }).first().click(); await page.getByRole('textbox', { name: 'Subject', exact: true }).fill('File drop budget fixture'); await waitSaved(page);
+    const uploaded: string[] = [], path = /\/api\/mailboxes\/[^/]+\/drafts\/[^/]+\/attachments$/;
+    const unexpectedUpload = async (route: import('playwright').Route) => { uploaded.push(route.request().headers()['x-attachment-filename'] ?? 'missing'); await route.fulfill({ status: 413, contentType: 'application/json', body: JSON.stringify({ error: 'attachment_too_large' }) }); };
+    await page.route(path, unexpectedUpload);
+    const selections: BrowserFile[][] = [
+      [{ name: 'visible-file.bin', content: 'must not partially upload' }, { name: 'folder', directory: true }],
+      Array.from({ length: 33 }, (_, index) => ({ name: `part-${index}.bin`, size: 0 })),
+      [{ name: 'oversized.bin', size: outbound.maxAttachmentBytes + 1 }],
+      [{ name: 'half-one.bin', size: Math.floor(outbound.maxAttachmentBytes / 2) + 1 }, { name: 'half-two.bin', size: Math.floor(outbound.maxAttachmentBytes / 2) + 1 }],
+    ];
+    try {
+      for (const selection of selections) {
+        const transfer = await transferFiles(page, selection);
+        try { await dispatchDrag(page, 'window', 'dragenter', transfer); await dispatchDrag(page, '.composer-body', 'dragover', transfer); await dispatchDrag(page, '.composer-body', 'drop', transfer); await page.locator('.composer [role=alert]').first().waitFor(); await page.locator('.composer-drop-overlay').waitFor({ state: 'detached' }); await page.waitForTimeout(100); assert.deepEqual(uploaded, []); assert.equal(await page.locator('.compose-attachments').count(), 0); } finally { await transfer.dispose(); }
+      }
+    } finally { await page.unroute(path, unexpectedUpload); }
+    const valid = await transferFiles(page, [{ name: 'after-rejection.bin', content: 'valid recovery' }]);
+    try { await dispatchDrag(page, 'window', 'dragenter', valid); await dispatchDrag(page, '.composer-body', 'dragover', valid); await dispatchDrag(page, '.composer-body', 'drop', valid); await page.locator('.compose-attachments').getByText('after-rejection.bin', { exact: true }).waitFor(); await waitSaved(page); } finally { await valid.dispose(); }
+    await closeCompose(page);
+  });
+  for (const reason of ['session', 'mail.send'] as const) await check(`File-drag state clears on ${reason} revocation and blocked composers cannot upload`, async () => {
+    const user = await consoleActor(reason === 'session' ? 'file-drop-blocked-session' : 'file-drop-blocked-permission', true), ctx = await browserContext(user), peer = await ctx.newPage();
+    try {
+      await peer.goto(origin); await peer.getByRole('button', { name: 'Compose', exact: true }).first().click(); await peer.getByRole('textbox', { name: 'Message body', exact: true }).fill('Keep this text when file access expires'); await waitSaved(peer);
+      const files = await transferFiles(peer, [{ name: 'must-not-upload.bin', content: 'blocked' }]); const uploaded: string[] = [];
+      peer.on('request', request => { if (request.method() === 'POST' && /\/drafts\/[^/]+\/attachments$/.test(new URL(request.url()).pathname)) uploaded.push(request.url()); });
+      try {
+        await dispatchDrag(peer, 'window', 'dragenter', files); await peer.locator('.composer-drop-overlay').waitFor();
+        if (reason === 'session') await pool.query("UPDATE auth_sessions SET expires_at=now()-interval '1 minute',idle_expires_at=now()-interval '1 minute' WHERE principal_id=$1", [user.id]);
+        else await pool.query("INSERT INTO auth_user_permission_overrides(principal_id,permission,effect) VALUES($1,'mail.send','deny')", [user.id]);
+        await peer.evaluate(() => window.dispatchEvent(new Event('focus')));
+        await peer.getByText('Your session or mailbox access is unavailable.', { exact: false }).waitFor(); await peer.locator('.composer-drop-overlay').waitFor({ state: 'detached' }); assert.equal(await peer.locator('.is-composer-file-dragging').count(), 0);
+        await dispatchDrag(peer, '.composer-body', 'drop', files); await peer.waitForTimeout(100); assert.deepEqual(uploaded, []); assert.equal(await peer.getByRole('textbox', { name: 'Message body', exact: true }).inputValue(), 'Keep this text when file access expires'); assert(await peer.getByRole('textbox', { name: 'Message body', exact: true }).evaluate(input => (input as HTMLTextAreaElement).readOnly && !(input as HTMLTextAreaElement).disabled));
+      } finally { await files.dispose(); }
+    } finally { await ctx.close(); }
   });
 
   await check('Hover and selected navigation remain distinct and reduced motion suppresses transitions', async () => {

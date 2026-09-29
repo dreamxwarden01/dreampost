@@ -569,3 +569,47 @@ input:not([type=checkbox]):not([type=radio]):focus-visible, select:focus-visible
 
 .mail-list-row .message-item:hover { background: transparent; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+/* Header labels sit outside the input underline. Focus has one clear indicator. */
+.composer-from, .composer-subject, .recipient-field,
+.composer-from:focus-within, .composer-subject:focus-within, .recipient-field:focus-within {
+  padding: 0; border: 0; box-shadow: none; background: transparent;
+}
+.composer-from > label, .composer-subject > label, .recipient-field > label { padding-top: 15px; }
+.composer-field-input, .recipient-field-input {
+  display: flex; flex: 1; min-width: 0; align-items: center; gap: 6px; min-height: 44px;
+  padding: 9px 0; border-bottom: 1px solid #edf0f4;
+  transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
+}
+.composer-field-input:focus-within, .recipient-field-input:focus-within {
+  border-bottom-color: #7399e1; box-shadow: 0 1px 0 #7399e1;
+}
+.composer .composer-field-input :is(input, select), .composer .recipient-field-input input,
+.composer .composer-field-input :is(input, select):focus,
+.composer .composer-field-input :is(input, select):focus-visible,
+.composer .recipient-field-input input:focus, .composer .recipient-field-input input:focus-visible {
+  border: 0; border-radius: 0; outline: none; box-shadow: none; background: transparent;
+}
+.administration-entry a.button { text-decoration: none; }
+.administration-entry a.button:hover { background: var(--hover-blue); color: #2456b5; }
+.composer-drop-target { position: relative; min-height: 210px; }
+.composer-drop-overlay {
+  position: absolute; inset: 6px 0; display: grid; place-content: center; gap: 7px; padding: 24px;
+  border: 2px dashed #a4b7d8; border-radius: 9px; color: #566981; background: #f4f7fdeb;
+  text-align: center; pointer-events: none; z-index: 2; animation: page-appear var(--motion-normal) var(--motion-ease);
+}
+.composer-drop-overlay strong { font-size: 16px; }
+.composer-drop-overlay span, .composer-drop-overlay p { font-size: 12px; line-height: 1.5; margin: 0; }
+.composer-drop-target.is-drop-allowed .composer-drop-overlay { border-color: var(--blue); color: #254f9b; background: #edf4ffef; }
+.composer-drop-target.is-drop-allowed .composer-body { background: #f8fbff; }
+/* File drags stay in the composing document instead of entering reader frames. */
+.is-composer-file-dragging iframe { pointer-events: none; }
+.attachment-upload-progress {
+  margin: 8px 0; padding: 10px 12px; border-radius: 7px; background: #f3f7fd;
+  color: #586e90; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere;
+}
+/* The visible blank message area is the same area that accepts a file drop. */
+.composer-scroll { display: flex; flex-direction: column; }
+.composer-scroll > * { flex-shrink: 0; }
+.composer-drop-target { display: flex; flex-direction: column; flex: 1 0 auto; }
+.composer-drop-target .composer-body { flex: 1 0 auto; }
