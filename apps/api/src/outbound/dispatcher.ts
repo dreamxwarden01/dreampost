@@ -7,6 +7,7 @@ import { digest, canonical } from './validation.js';
 import { ProviderRejection } from './provider.js';
 import { releaseTerminalDraftStaging } from './staging.js';
 import type { Admission } from './types.js';
+import { normalizeProviderRfcMessageId } from '../mail/threading.js';
 
 async function transaction<T>(service:OutboundService,work:(client:PoolClient)=>Promise<T>):Promise<T>{
   const client=await service.pool.connect();try{await client.query('BEGIN');const value=await work(client);await client.query('COMMIT');return value;}catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
@@ -49,19 +50,19 @@ async function outcome(service:OutboundService,admission:Admission,result:Outbou
       await client.query('UPDATE outbound_recipients SET status=$3,code=$4 WHERE submission_id=$1 AND address=$2',[row.id,recipient.address,recipient.status,recipient.code?.slice(0,128)??null]);}
     const state=accepted===expected.size?'accepted':accepted?'partial':unknown?'unknown':'failed';
     await client.query("UPDATE outbound_attempts SET state='completed',result=$2,completed_at=now() WHERE id=$1",[admission.attemptId,result]);
-    await client.query(`UPDATE outbound_submissions SET state=$2,provider_message_id=$3,error_code=NULL,sent_copy_state=$4,version=version+1,updated_at=now(),lease_id=NULL,lease_until=NULL,available_at=now() WHERE id=$1`,[row.id,state,result.providerMessageId??null,accepted?'pending':'none']);
+    await client.query(`UPDATE outbound_submissions SET state=$2,provider_message_id=$3,error_code=NULL,sent_copy_state=$4,rfc_message_id=$5,version=version+1,updated_at=now(),lease_id=NULL,lease_until=NULL,available_at=now() WHERE id=$1`,[row.id,state,result.providerMessageId??null,accepted?'pending':'none',accepted?normalizeProviderRfcMessageId(result.rfcMessageId):null]);
   });
 }
 export async function ensureSentCopy(service:OutboundService):Promise<boolean>{
   const candidate=(await service.pool.query<SubmissionRow>("SELECT * FROM outbound_submissions WHERE sent_copy_state='pending' AND available_at<=now() ORDER BY created_at,id LIMIT 1")).rows[0];if(!candidate)return false;
   try{
     if(!candidate.raw_sha256||candidate.raw_size===null)throw new Error('sent_source_missing');
-    const prepared=await service.deps.prepareSent({...candidate.snapshot,rawSha256:candidate.raw_sha256,rawSize:candidate.raw_size,providerMessageId:candidate.provider_message_id});
+    const prepared=await service.deps.prepareSent({...candidate.snapshot,rawSha256:candidate.raw_sha256,rawSize:candidate.raw_size,providerMessageId:candidate.provider_message_id,rfcMessageId:candidate.rfc_message_id});
     await transaction(service,async client=>{
     await client.query('SELECT id FROM mailboxes WHERE id=$1 FOR UPDATE',[candidate.mailbox_id]);
     const row=(await client.query<SubmissionRow>("SELECT * FROM outbound_submissions WHERE id=$1 AND sent_copy_state='pending' FOR UPDATE SKIP LOCKED",[candidate.id])).rows[0];if(!row)return;
     if(!row.raw_sha256||row.raw_size===null)throw new Error('sent_source_missing');
-    const sentMessageId=await service.deps.persistSent(client,{...row.snapshot,rawSha256:row.raw_sha256,rawSize:row.raw_size,providerMessageId:row.provider_message_id},prepared);
+    const sentMessageId=await service.deps.persistSent(client,{...row.snapshot,rawSha256:row.raw_sha256,rawSize:row.raw_size,providerMessageId:row.provider_message_id,rfcMessageId:row.rfc_message_id},prepared);
     await client.query("UPDATE outbound_submissions SET sent_copy_state='done',sent_message_id=$2,error_code=NULL,version=version+1,updated_at=now() WHERE id=$1",[row.id,sentMessageId]);
   });}catch{await service.pool.query("UPDATE outbound_submissions SET error_code='sent_copy_failed',available_at=now()+interval '30 seconds' WHERE id=$1 AND sent_copy_state='pending'",[candidate.id]);}
   return true;

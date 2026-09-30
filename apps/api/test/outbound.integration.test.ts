@@ -53,6 +53,31 @@ describe.skipIf(!databaseUrl)('durable drafts and outgoing submission state',()=
  }
 
 
+ it.each(['partial','unknown'] as const)('records provider RFC identity only when %s outcomes contain an accepted recipient',async(outcome)=>{
+  const wire='<Outcome.Case@example.test>';
+  deps.transport!.send=async input=>{calls.push({recipients:input.recipients,mime:input.mime});return{providerMessageId:wire,rfcMessageId:wire,
+    recipients:input.recipients.map((address,index)=>({address,status:outcome==='unknown'?'unknown' as const:index===0?'accepted' as const:'failed' as const}))};};
+  const submission=await submit(await editable(['first@external.test','second@external.test']));
+  await runOneOutboundJob(service);
+  expect((await pool.query('SELECT state,rfc_message_id,provider_message_id,sent_copy_state FROM outbound_submissions WHERE id=$1',[submission.id])).rows[0])
+   .toEqual({state:outcome,rfc_message_id:outcome==='partial'?wire:null,provider_message_id:wire,sent_copy_state:outcome==='partial'?'pending':'none'});
+  await runOneOutboundJob(service);await runOneOutboundJob(service);expect(calls).toHaveLength(1);
+  expect((await service.getSubmission(alice,mailboxId,submission.id)).state).toBe(outcome);
+ });
+ it('persists only explicit accepted RFC identity before retryable Sent work, without changing frozen raw MIME',async()=>{
+  const wire='<Provider.Case@example.test>';
+  deps.transport!.send=async input=>{calls.push({recipients:input.recipients,mime:input.mime});return{providerMessageId:wire,rfcMessageId:wire,recipients:input.recipients.map(address=>({address,status:'accepted' as const}))};};
+  const draft=await editable(),submission=await submit(draft);const before=(await pool.query('SELECT snapshot,raw_sha256,raw_size FROM outbound_submissions WHERE id=$1',[submission.id])).rows[0];
+  const persist=vi.spyOn(deps,'persistSent');sentFail=true;
+  await runOneOutboundJob(service);
+  expect((await pool.query('SELECT rfc_message_id,state,sent_copy_state FROM outbound_submissions WHERE id=$1',[submission.id])).rows[0]).toEqual({rfc_message_id:wire,state:'accepted',sent_copy_state:'pending'});
+  await runOneOutboundJob(service);expect(persist.mock.calls[0]![1].rfcMessageId).toBe(wire);expect(calls).toHaveLength(1);
+  expect((await pool.query('SELECT snapshot,raw_sha256,raw_size FROM outbound_submissions WHERE id=$1',[submission.id])).rows[0]).toEqual(before);
+  const raw=await blobs.get(before.raw_sha256);expect(raw.toString()).toContain(`Message-ID: ${before.snapshot.messageIdHeader}`);expect(raw.toString()).not.toContain(wire);
+  deps.transport!.send=async input=>({providerMessageId:wire,recipients:input.recipients.map(address=>({address,status:'accepted' as const}))});
+  const opaque=await submit(await editable());await runOneOutboundJob(service);
+  expect((await pool.query('SELECT rfc_message_id,state FROM outbound_submissions WHERE id=$1',[opaque.id])).rows[0]).toEqual({rfc_message_id:null,state:'accepted'});
+ });
  it('sanitizes inherited header presentation at code-point boundaries and preserves unsupported address chips through autosave',async()=>{
   const longAddress='\u540d'.repeat(250)+'@external.test';
   const original=await source({subject:'\t'+ '\u{1f642}'.repeat(310),cc:[{name:'Long\t'+ '\u{1f642}'.repeat(180),address:longAddress}]});

@@ -11,7 +11,7 @@ import { getReaderData, parseMimeIsolated, storeReaderData } from './reader-data
 import { attachmentManifestSha256, extractAttachmentsIsolated } from './attachments/extractor.js';
 import { enqueueAttachmentExtraction, getAttachment, listAttachments } from './attachments/service.js';
 import { appendChange } from './database.js';
-import { indexMessageThread, initializeMessageState, normalizeMessageId } from './mail/threading.js';
+import { getOutboundRfcMessageId, indexMessageThread, initializeMessageState, linkOutboundMessageId, normalizeMessageId } from './mail/threading.js';
 
 interface SourceRow {
   id: string; mailbox_id: string; direction: 'inbound' | 'outbound'; sha256: string; raw_size: number;
@@ -48,11 +48,14 @@ export function createOutboundDependencies(
     const headers = reader.headers;
     const visible = headers.addresses!;
     const attachments = await listAttachments(client, messageId);
+    // The original reader headers remain unchanged. Outbound replies use the
+    // provider-confirmed wire identity only when tied to this exact Sent copy.
+    const wireMessageId = row.direction === 'outbound' ? await getOutboundRfcMessageId(client, { mailboxId, messageId }) : null;
     return {
       messageId, mailboxId, direction: row.direction, sourceSha256: row.sha256, contentVersion: contentVersion(row, reader.parserVersion),
       from: visible.from, replyTo: visible.replyTo, to: visible.to, cc: visible.cc,
       subject: headers.subject, sentAt: headers.sentAt, text: row.plain_text,
-      messageIdHeader: normalizeMessageId(headers.messageId) ? `<${normalizeMessageId(headers.messageId)}>` : null,
+      messageIdHeader: wireMessageId ?? (normalizeMessageId(headers.messageId) ? `<${normalizeMessageId(headers.messageId)}>` : null),
       inReplyTo: identifiers(headers.inReplyTo), references: identifiers(headers.references),
       envelopeTo: row.direction === 'inbound' && typeof row.metadata.envelopeTo === 'string' ? row.metadata.envelopeTo : null,
       attachments: attachments.items.map(item => ({ id: item.id, filename: item.filename, mimeType: item.mimeType, sizeBytes: item.sizeBytes, sha256: item.sha256 })),
@@ -76,6 +79,7 @@ export function createOutboundDependencies(
     if (existing) {
       if (existing.mailbox_id !== snapshot.mailboxId || existing.sha256 !== snapshot.rawSha256 || existing.raw_size !== snapshot.rawSize
         || existing.direction !== 'outbound' || existing.metadata.kind !== 'outbound' || existing.metadata.submissionId !== id) throw new Error('sent_copy_identity_conflict');
+      await linkOutboundMessageId(client, { mailboxId: snapshot.mailboxId, messageId: id });
       return id;
     }
     const parsed = prepared.parsed;

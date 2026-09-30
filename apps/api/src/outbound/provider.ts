@@ -1,5 +1,6 @@
 import type { MailTransport, OutboundSubmission, OutboundResult } from '@dreampost/protocol';
 import type { OutboundConfig } from './config.js';
+import { normalizeProviderRfcMessageId } from '../mail/threading.js';
 export class ProviderRejection extends Error {
   constructor(readonly code:string,readonly retryable=false,readonly retryAfterSeconds=30){super(code);this.name='ProviderRejection';}
 }
@@ -43,6 +44,10 @@ export class CloudflareRawTransport implements MailTransport {
     }
     const id=result.message_id;
     if(id!==undefined&&(typeof id!=='string'||id.length>998||/[\r\n\0]/.test(id)))throw new UnknownSubmission('provider_reply_invalid');
-    return {...(typeof id==='string'&&id?{providerMessageId:id}:{}),recipients:submission.recipients.map(address=>outcomes.get(address)??{address,status:'unknown',code:'provider_recipient_unreported'})};
+    // Cloudflare documents message_id with a bracketed sent-message example;
+    // the controlled raw-send/reply probe confirmed its wire-ID meaning. Other
+    // transports may have only opaque receipts; those never become thread aliases.
+    const rfcMessageId=normalizeProviderRfcMessageId(id);
+    return {...(typeof id==='string'&&id?{providerMessageId:id}:{}),...(rfcMessageId?{rfcMessageId}:{}),recipients:submission.recipients.map(address=>outcomes.get(address)??{address,status:'unknown',code:'provider_recipient_unreported'})};
   }
 }

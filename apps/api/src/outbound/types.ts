@@ -24,7 +24,7 @@ export interface SendSnapshot {
   sourceMessageId: string | null; inReplyTo: string[]; references: string[];
   messageIdHeader: string; date: string; attachments: DraftAttachment[];
 }
-export interface SentCopyInput extends SendSnapshot { rawSha256: string; rawSize: number; providerMessageId: string | null }
+export interface SentCopyInput extends SendSnapshot { rawSha256: string; rawSize: number; providerMessageId: string | null; rfcMessageId?: string | null }
 export interface PreparedSent { rawSha256:string; rawSize:number; parsed:ParsedReaderMessage }
 export interface OutboundDependencies {
   resolvePrincipal(principalId: string, client: PoolClient, options?: {readOnly?:boolean}): Promise<Actor>;

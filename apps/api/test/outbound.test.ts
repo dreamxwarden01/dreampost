@@ -42,7 +42,15 @@ describe('outbound composition and provider boundary',()=>{
   const result=await new CloudflareRawTransport(config,fake).send({submissionId:s.submissionId,envelopeFrom:s.from.address,recipients:s.envelopeRecipients,mime});
   expect(fake).toHaveBeenCalledTimes(1);expect(result.recipients.map(r=>r.status)).toEqual(['accepted','accepted','failed']);expect(result.recipients[2]!.code).toBe('cf_suppressed_recipients');
  });
- it('does not retry uncertain network or internal failure responses',async()=>{
+ it('records an explicit case-preserved Cloudflare RFC identity separately from opaque tracking receipts',async()=>{
+  const input={submissionId:randomUUID(),envelopeFrom:'a@example.test',recipients:['b@example.test'],mime:Buffer.from('body')};
+  for(const id of ['<Wire.Case@Example.test>','opaque-receipt','unbracketed@example.test','<a@example.test> <b@example.test>','<a@\u4f8b.example>']){
+   const result=await new CloudflareRawTransport(config,async()=>Response.json({success:true,result:{message_id:id,delivered:[],queued:input.recipients,permanent_bounces:[]}})).send(input);
+   expect(result.providerMessageId).toBe(id);expect(result.rfcMessageId).toBe(id==='<Wire.Case@Example.test>'?id:undefined);
+   expect(result.recipients[0]!.status).toBe('accepted');
+  }
+ });
+ it('does not retry uncertain network or internal failure responses' ,async()=>{
   for(const fake of [vi.fn(async()=>{throw new Error('timeout');}),vi.fn(async()=>Response.json({success:false,errors:[{code:10002}]},{status:500})),vi.fn(async()=>new Response('proxy',{status:503}))]){
    await expect(new CloudflareRawTransport(config,fake).send({submissionId:randomUUID(),envelopeFrom:'a@example.test',recipients:['b@example.test'],mime:Buffer.from('body')})).rejects.toBeInstanceOf(UnknownSubmission);expect(fake).toHaveBeenCalledTimes(1);
   }

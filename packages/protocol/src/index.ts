@@ -61,7 +61,10 @@ export interface OutboundSubmission {
   mime: Uint8Array;
 }
 export interface OutboundResult {
+  /** Opaque provider receipt/tracking identifier; never infer RFC identity from it. */
   providerMessageId?: string;
+  /** Explicit provider-confirmed RFC Message-ID, including angle brackets. */
+  rfcMessageId?: string;
   recipients: Array<{ address: string; status: 'accepted' | 'failed' | 'unknown'; code?: string }>;
 }
 /** Callers must enforce current sending-identity authorization before submission. */
