@@ -3,7 +3,8 @@ import { ApiError } from '../api';
 export type Folder = 'inbox' | 'archive' | 'trash' | 'spam' | 'sent' | 'all';
 export interface MailAddress { name: string; address: string }
 export interface MailState { id: string; threadId: string | null; read: boolean; starred: boolean; folder: 'inbox' | 'archive' | 'trash' | 'spam'; labelIds: string[]; version: string }
-export interface MailMessage extends MailState { subject: string; from: string; to: string; receivedAt: string; preview: string; status: string; sizeBytes: number; direction: 'inbound' | 'outbound' }
+export interface MailCopy extends Omit<MailState, 'threadId'> { direction: 'inbound' | 'outbound' }
+export interface MailMessage extends MailState { copyGroupId: string; copies: MailCopy[]; subject: string; from: string; to: string; receivedAt: string; preview: string; status: string; sizeBytes: number; direction: 'inbound' | 'outbound' }
 export interface MailThread { id: string; subject: string; preview: string; receivedAt: string; from: string; to: string; messageCount: number; matchedCount: number; unreadCount: number; starred: boolean; lastMessageId: string }
 export interface Capabilities { canSetPersonalFlags: boolean; canManageMessages: boolean; canManageLabels: boolean }
 export interface MailPage { view: 'messages' | 'threads'; messages: MailMessage[]; threads: MailThread[]; nextCursor: string | null; changeSequence: string; capabilities: Capabilities }
@@ -92,7 +93,19 @@ export function decodeState(raw: unknown): MailState {
 }
 export function decodeMessage(raw: unknown): MailMessage {
   const i = object(raw); const direction = text(i.direction); if (!['inbound', 'outbound'].includes(direction)) throw new MailApiError('Invalid message direction.');
-  return { ...decodeState(i), subject: text(i.subject), from: text(i.from), to: text(i.to), receivedAt: text(i.receivedAt), preview: text(i.preview), status: text(i.status), sizeBytes: count(i.sizeBytes), direction: direction as MailMessage['direction'] };
+  const state = decodeState(i);
+  // An older running API has no copy relation; preserve it as a singleton during rollout.
+  // Partial metadata is still invalid, and this fallback never asserts equivalence.
+  const legacy = i.copyGroupId === undefined && i.copies === undefined;
+  const copyValues = legacy ? [{ ...state, direction }] : i.copies;
+  const copies = array(copyValues).map(rawCopy => {
+    const copy = object(rawCopy), copyDirection = text(copy.direction);
+    if (!['inbound', 'outbound'].includes(copyDirection)) throw new MailApiError('Invalid stored copy direction.');
+    const { threadId: _threadId, ...copyState } = decodeState({ ...copy, threadId: null });
+    return { ...copyState, direction: copyDirection as MailCopy['direction'] };
+  });
+  if (!copies.length || new Set(copies.map(copy => copy.id)).size !== copies.length || !copies.some(copy => copy.id === state.id && copy.version === state.version)) throw new MailApiError('Invalid stored copy metadata.');
+  return { ...state, copyGroupId: legacy ? state.id : text(i.copyGroupId), copies, subject: text(i.subject), from: text(i.from), to: text(i.to), receivedAt: text(i.receivedAt), preview: text(i.preview), status: text(i.status), sizeBytes: count(i.sizeBytes), direction: direction as MailMessage['direction'] };
 }
 export function decodeCapabilities(raw: unknown): Capabilities {
   const i = object(raw); return { canSetPersonalFlags: bool(i.canSetPersonalFlags), canManageMessages: bool(i.canManageMessages), canManageLabels: bool(i.canManageLabels) };
@@ -103,12 +116,12 @@ export function decodePage(raw: unknown): MailPage {
 }
 export interface MailQuery { folder: Folder; view: 'messages' | 'threads'; q?: string; unread?: boolean; starred?: boolean; labelId?: string }
 export async function loadMail(mailboxId: string, query: MailQuery, cursor: string | null, signal: AbortSignal, background = false): Promise<MailPage> {
-  const params = new URLSearchParams({ folder: query.folder, view: query.view, limit: '50' });
+  const params = new URLSearchParams({ folder: query.folder, view: query.view, limit: '50', groupCopies: 'true' });
   if (query.q) params.set('q', query.q); if (query.unread) params.set('unread', 'true'); if (query.starred) params.set('starred', 'true'); if (query.labelId) params.set('labelId', query.labelId); if (cursor) params.set('cursor', cursor);
   return decodePage(await mailRequest(`${boxPath(mailboxId)}/messages?${params}`, { signal, background }));
 }
 export async function loadThread(mailboxId: string, threadId: string, folder: Folder, cursor: string | null, signal: AbortSignal, background = false): Promise<MailPage> {
-  const params = new URLSearchParams({ limit: '50', folder: folder === 'trash' || folder === 'spam' ? folder : 'all' }); if (cursor) params.set('cursor', cursor);
+  const params = new URLSearchParams({ limit: '50', folder: folder === 'trash' || folder === 'spam' ? folder : 'all', groupCopies: 'true' }); if (cursor) params.set('cursor', cursor);
   return decodePage(await mailRequest(`${boxPath(mailboxId)}/threads/${encodeURIComponent(threadId)}?${params}`, { signal, background }));
 }
 export function decodeMutation(raw: unknown): MutationResult { const i = object(raw); return { operationId: text(i.operationId), messages: array(i.messages).map(decodeState), changeSequence: text(i.changeSequence), undoUntil: nullableText(i.undoUntil) }; }

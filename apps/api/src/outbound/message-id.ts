@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { UUID } from '../config.js';
 import { appendChange } from '../database.js';
-import { linkOutboundMessageId, normalizeProviderRfcMessageId, type OutboundMessageIdLink } from '../mail/threading.js';
+import { linkOutboundMessageId, normalizeProviderRfcMessageId, reconcileVerifiedCopies, type OutboundMessageIdLink } from '../mail/threading.js';
 
 export interface VerifiedOutboundMessageIdRepair {
   mailboxId: string; submissionId: string;
@@ -44,5 +44,6 @@ export async function recordVerifiedOutboundRfcMessageId(
     await appendChange(client,input.mailboxId,input.submissionId,'message.provider_identity_recorded',
       {data:{operatorLabel:input.operatorLabel,rfcMessageId:wire}});
   }
+  await reconcileVerifiedCopies(client,{mailboxId:input.mailboxId,messageId:input.submissionId});
   return { ...await linkOutboundMessageId(client,{mailboxId:input.mailboxId,messageId:input.submissionId}), recorded };
 }

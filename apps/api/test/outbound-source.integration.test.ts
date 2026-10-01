@@ -8,6 +8,7 @@ import type { AuthService } from '../src/auth/service.js';
 import type { AddressService } from '../src/addresses/service.js';
 import type { ApiConfig } from '../src/config.js';
 import type { SentCopyInput } from '../src/outbound/types.js';
+import { backfillMailContentFingerprints } from '../src/mail/fingerprint-backfill.js';
 import { recordVerifiedOutboundRfcMessageId } from '../src/outbound/message-id.js';
 import { ensureSentCopy } from '../src/outbound/dispatcher.js';
 import { OutboundService } from '../src/outbound/service.js';
@@ -105,6 +106,41 @@ describe.skipIf(!databaseUrl)('outbound immutable-source and prepared Sent integ
       await expect(pool.query('UPDATE outbound_submissions SET rfc_message_id=NULL WHERE id=$1',[snapshot.submissionId])).rejects.toThrow('outbound_rfc_message_id_immutable');
       expect((await pool.query('SELECT headers FROM message_reader_data WHERE delivery_id=$1',[snapshot.submissionId])).rows[0].headers.messageId).toBe('<immutable@example.test>');
     }finally{await client.query('ROLLBACK');client.release();}
+  });
+  it('backfills existing raw evidence in bounded pages, without rewriting reader data or repeating completed work',async()=>{
+    const extra=randomUUID();
+    await pool.query("INSERT INTO deliveries(id,mailbox_id,metadata,sha256,raw_size,received_at,plain_text,parse_status) VALUES($1,$2,'{}',$3,$4,now(),'Original text.','parsed')",[extra,mailboxId,sha256,raw.length]);
+    await pool.query("UPDATE deliveries SET parse_status='parsed' WHERE id=$1",[messageId]);
+    for(const id of [messageId,extra])await pool.query(`INSERT INTO mail_thread_headers(message_id,mailbox_id,parser_version,message_id_header) VALUES($1,$2,2,'immutable@example.test')`,[id,mailboxId]);
+    const blobs={get,put:async()=>{}};
+    const first=await backfillMailContentFingerprints(pool,blobs,{limit:1,mailboxId});
+    expect(first.processed).toBe(1);expect(first.nextCursor).toBeTruthy();
+    const second=await backfillMailContentFingerprints(pool,blobs,{limit:1,afterDeliveryId:first.nextCursor!,mailboxId});
+    expect(second.processed).toBe(1);expect(second.nextCursor).toBeNull();
+    expect(await backfillMailContentFingerprints(pool,blobs,{mailboxId})).toMatchObject({processed:0,linked:0,moved:0});
+    expect(get).toHaveBeenCalledTimes(2);
+    expect((await pool.query('SELECT sha256,raw_size FROM deliveries ORDER BY id')).rows).toEqual([{sha256,raw_size:raw.length},{sha256,raw_size:raw.length}]);
+    expect((await pool.query('SELECT headers FROM message_reader_data WHERE delivery_id=$1',[messageId])).rows[0].headers.messageId).toBe('<immutable@example.test>');
+  });
+  it('rejects changed raw bytes and rechecks tombstones after unlocked backfill hashing',async()=>{
+    await pool.query("UPDATE deliveries SET parse_status='parsed' WHERE id=$1",[messageId]);
+    await pool.query(`INSERT INTO mail_thread_headers(message_id,mailbox_id,parser_version,message_id_header) VALUES($1,$2,2,'immutable@example.test')`,[messageId,mailboxId]);
+    get.mockResolvedValue(Buffer.from('different bytes'));
+    expect(await backfillMailContentFingerprints(pool,{get,put:async()=>{}},{mailboxId})).toMatchObject({processed:0,failures:[{deliveryId:messageId,code:'fingerprint_raw_identity_mismatch'}]});
+    expect((await pool.query('SELECT count(*) AS n FROM mail_content_fingerprints')).rows[0].n).toBe('0');
+    get.mockImplementation(async()=>{await pool.query('UPDATE deliveries SET deleted_at=now() WHERE id=$1',[messageId]);return raw;});
+    expect(await backfillMailContentFingerprints(pool,{get,put:async()=>{}},{mailboxId})).toMatchObject({processed:0});
+    expect((await pool.query('SELECT count(*) AS n FROM mail_content_fingerprints')).rows[0].n).toBe('0');
+  });
+  it('continues a backfill past an unavailable blob and returns per-row recovery evidence',async()=>{
+    const ids=[randomUUID(),randomUUID()].sort(),otherSha=createHash('sha256').update('unavailable').digest('hex');
+    for(const [index,id]of ids.entries()){
+      await pool.query("INSERT INTO deliveries(id,mailbox_id,metadata,sha256,raw_size,received_at,parse_status) VALUES($1,$2,'{}',$3,$4,now(),'parsed')",[id,mailboxId,index?sha256:otherSha,raw.length]);
+      await pool.query("INSERT INTO mail_thread_headers(message_id,mailbox_id,parser_version,message_id_header) VALUES($1,$2,2,'backfill@example.test')",[id,mailboxId]);
+    }
+    const result=await backfillMailContentFingerprints(pool,{get:async sha=>{if(sha===otherSha)throw new Error('missing');return raw;},put:async()=>{}},{mailboxId,limit:2});
+    expect(result).toMatchObject({processed:1,nextCursor:null,failures:[{deliveryId:ids[0],code:'fingerprint_raw_unavailable'}]});
+    expect((await pool.query('SELECT delivery_id FROM mail_content_fingerprints ORDER BY delivery_id')).rows).toEqual([{delivery_id:ids[1]}]);
   });
   it('uses persisted compatible metadata across parser upgrades without parsing or reading blobs in a transaction', async () => {
     const deps = dependencies(), client = await pool.connect();

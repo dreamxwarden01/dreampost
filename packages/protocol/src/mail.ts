@@ -9,7 +9,15 @@ export interface MailMessageState {
   /** Opaque filing:personal version. Only components affected by a mutation are compared. */
   version: string;
 }
+export interface MailMessageCopy {
+  id: string; version: string; folder: MailFolder; read: boolean; starred: boolean;
+  direction: MailDirection; labelIds: string[];
+}
 export interface MailMessageSummary extends MailMessageState {
+  /** Stable, mailbox-local display equivalence; resource access still uses id. */
+  copyGroupId: string;
+  /** Only folder-visible, already-authorized copies; never private outbox data. */
+  copies: MailMessageCopy[];
   subject: string; from: string; to: string; receivedAt: string; preview: string;
   status: 'pending' | 'parsed' | 'failed'; sizeBytes: number; direction: MailDirection;
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { decodePage, loadMail, mailRequest, parseRetryAfter, watchMailbox } from './api';
+import { decodePage, loadMail, loadThread, mailRequest, parseRetryAfter, watchMailbox } from './api';
 const capabilities = { canSetPersonalFlags: true, canManageMessages: false, canManageLabels: false };
 afterEach(() => vi.unstubAllGlobals());
 describe('mailbox client boundaries', () => {
@@ -7,7 +7,13 @@ describe('mailbox client boundaries', () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ view: 'messages', messages: [], nextCursor: null, changeSequence: '9007199254740999', capabilities })); vi.stubGlobal('fetch', fetch);
     const result = await loadMail('box', { folder: 'inbox', view: 'messages', q: '中文 + literal%', unread: true }, 'opaque:cursor/value', new AbortController().signal, true);
     const [path, options] = fetch.mock.calls[0]!; const url = new URL(String(path), 'https://mail.example.test');
-    expect(url.searchParams.get('q')).toBe('中文 + literal%'); expect(url.searchParams.get('cursor')).toBe('opaque:cursor/value'); expect(options?.headers).toMatchObject({ 'X-DreamPost-Background': '1' }); expect(options?.credentials).toBe('same-origin'); expect(result.changeSequence).toBe('9007199254740999');
+    expect(url.searchParams.get('groupCopies')).toBe('true'); expect(url.searchParams.get('q')).toBe('中文 + literal%'); expect(url.searchParams.get('cursor')).toBe('opaque:cursor/value'); expect(options?.headers).toMatchObject({ 'X-DreamPost-Background': '1' }); expect(options?.credentials).toBe('same-origin'); expect(result.changeSequence).toBe('9007199254740999');
+  });
+  it('explicitly opts thread reads into grouped semantics while preserving folder visibility and opaque cursors', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ view: 'messages', messages: [], nextCursor: null, changeSequence: '1', capabilities })); vi.stubGlobal('fetch', fetch);
+    await loadThread('box', 'thread', 'sent', 'old:cursor', new AbortController().signal, true);
+    const url = new URL(String(fetch.mock.calls[0]![0]), 'https://mail.example.test');
+    expect(url.searchParams.get('groupCopies')).toBe('true'); expect(url.searchParams.get('folder')).toBe('all'); expect(url.searchParams.get('cursor')).toBe('old:cursor');
   });
   it('rejects a numeric message revision rather than rounding a server concurrency token', () => {
     expect(() => decodePage({ view: 'messages', messages: [{ id: 'one', threadId: null, read: false, starred: false, folder: 'inbox', labelIds: [], version: 1 }], nextCursor: null, changeSequence: '1', capabilities })).toThrow();

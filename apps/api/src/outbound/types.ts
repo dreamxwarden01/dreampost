@@ -1,3 +1,4 @@
+import type { MailContentFingerprint } from '../mail/content-fingerprint.js';
 import type { ParsedReaderMessage } from '../reader-data.js';
 import type { PoolClient } from 'pg';
 import type { Actor } from '../auth/service.js';
@@ -25,7 +26,7 @@ export interface SendSnapshot {
   messageIdHeader: string; date: string; attachments: DraftAttachment[];
 }
 export interface SentCopyInput extends SendSnapshot { rawSha256: string; rawSize: number; providerMessageId: string | null; rfcMessageId?: string | null }
-export interface PreparedSent { rawSha256:string; rawSize:number; parsed:ParsedReaderMessage }
+export interface PreparedSent { rawSha256:string; rawSize:number; parsed:ParsedReaderMessage; contentFingerprint:MailContentFingerprint|null }
 export interface OutboundDependencies {
   resolvePrincipal(principalId: string, client: PoolClient, options?: {readOnly?:boolean}): Promise<Actor>;
   listSendingIdentities(principalId: string): Promise<SenderEligibility[]>;

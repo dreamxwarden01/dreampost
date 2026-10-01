@@ -16,7 +16,9 @@ import { AuthService, type AuthConfig } from '../apps/api/src/auth/index.js';
 import { SESSION_COOKIE } from '../apps/api/src/auth/types.js';
 import { AddressService } from '../apps/api/src/addresses/index.js';
 import { indexMessageThread, initializeMessageState } from '../apps/api/src/mail/index.js';
-import { OutboundService, loadOutboundConfig, runOneOutboundJob } from '../apps/api/src/outbound/index.js';
+import { OutboundService, loadOutboundConfig, runOneOutboundJob, ensureSentCopy } from '../apps/api/src/outbound/index.js';
+import { fingerprintMessageContent } from '../apps/api/src/mail/content-fingerprint.js';
+import { storeMailContentFingerprint } from '../apps/api/src/mail/verified-copies.js';
 import { createOutboundDependencies } from '../apps/api/src/outbound-integration.js';
 import type { ApiConfig } from '../apps/api/src/config.js';
 import type { MailTransport } from '../packages/protocol/dist/index.js';
@@ -27,6 +29,7 @@ const databaseUrl = process.env['TEST_DATABASE_URL'];
 if (!databaseUrl) throw new Error('TEST_DATABASE_URL is required; this runner creates and drops an isolated schema.');
 const root = resolve(new URL('..', import.meta.url).pathname), output = resolve(root, process.env['EVERYDAY_QA_OUTPUT'] ?? '.local/everyday-qa');
 const only = process.env['EVERYDAY_QA_ONLY'];
+const webDist = resolve(root, process.env['EVERYDAY_QA_WEB_DIST'] ?? 'apps/web/dist');
 const readOpeningEvidence: Array<{ view: string; phase: string; mutations: Array<{ read: boolean; version: string; status?: number }> }> = [];
 const schema = `everyday_browser_${randomUUID().replaceAll('-', '')}`;
 const admin = new Pool({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
@@ -48,7 +51,7 @@ const web = createServer((request, response) => {
   if (path === '/favicon.ico') { response.writeHead(204).end(); return; }
   const asset = path.match(/^\/assets\/([A-Za-z0-9_.-]+\.(js|css))$/);
   const spa = ['/', '/settings/reading', '/settings/addresses', '/postmaster'].includes(path);
-  const file = spa ? join(root, 'apps/web/dist/index.html') : asset ? join(root, 'apps/web/dist/assets', asset[1]!) : null;
+  const file = spa ? join(webDist, 'index.html') : asset ? join(webDist, 'assets', asset[1]!) : null;
   if (!file) { response.writeHead(404).end(); return; }
   void readFile(file).then(bytes => response.writeHead(200, { 'Content-Type': spa ? 'text/html' : path.endsWith('.css') ? 'text/css' : 'text/javascript', 'Cache-Control': 'no-store' }).end(bytes)).catch(() => response.writeHead(404).end());
 });
@@ -163,6 +166,46 @@ try {
   const config: ApiConfig = { databaseUrl, mailStorePath: join(directory, 'raw'), ingestKeys: { qa: randomBytes(32).toString('hex') }, devViewToken: randomBytes(32).toString('hex'), devMailboxId: box.id, host: '127.0.0.1', port: 0, publicBaseUrl: origin, auth: authConfig, addresses: { defaultDomain: 'example.test', managedDomains: ['example.test'] }, outbound };
   api = buildApp(config, pool, { blobs, outboundTransport: transport, authFetch: async () => { throw new Error('Identity-provider requests are forbidden in this fixture'); } }); apiOrigin = await api.listen({ host: '127.0.0.1', port: 0 });
   const jobService = new OutboundService(pool, outbound, { ...createOutboundDependencies(config, pool, auth, addresses, blobs), transport });
+  const selfCopyEvidence: Array<Record<string, unknown>> = [];
+  async function receiveSyntheticCopy(bytes: Buffer, targetMailbox = box.id) {
+    const admission = (await pool.query('SELECT address,allocation_id,revision,sha256 FROM address_policy_history WHERE mailbox_id=$1 AND receive_enabled ORDER BY revision DESC LIMIT 1', [targetMailbox])).rows[0];
+    assert(admission, 'Synthetic copy requires its actual admission-era route');
+    const id = randomUUID(), digest = createHash('sha256').update(bytes).digest('hex'), parsed = await parseMimeIsolated(bytes);
+    const fingerprint = fingerprintMessageContent(bytes); assert(fingerprint, 'Generated copy must have full MIME evidence');
+    await blobs.put(digest, bytes); const client = await pool.connect();
+    try {
+      await client.query('BEGIN'); const received = new Date(Date.now() + order++ * 1000).toISOString();
+      const metadata = { version: 2, deliveryId: id, mailboxId: targetMailbox, envelopeFrom: 'alice@example.test', envelopeTo: admission.address, receivedAt: received, rawSize: bytes.length, allocationId: admission.allocation_id, routeRevision: Number(admission.revision), policyDigest: admission.sha256 };
+      await client.query(`INSERT INTO deliveries(id,mailbox_id,metadata,sha256,raw_size,received_at,parse_status,subject,from_header,to_header,plain_text,preview) VALUES($1,$2,$3,$4,$5,$6,'parsed',$7,$8,$9,$10,$11)`, [id, targetMailbox, metadata, digest, bytes.length, received, parsed.subject, parsed.from, parsed.to, parsed.text, parsed.preview]);
+      await storeReaderData(client, id, parsed.reader);
+      await storeMailContentFingerprint(client, { deliveryId: id, mailboxId: targetMailbox, ...fingerprint, rawSha256: digest, rawSize: bytes.length });
+      await initializeMessageState(client, { messageId: id, mailboxId: targetMailbox });
+      await indexMessageThread(client, { mailboxId: targetMailbox, messageId: id, messageIdHeader: parsed.reader.headers.messageId, references: parsed.reader.headers.references, inReplyTo: parsed.reader.headers.inReplyTo, parserVersion: parsed.reader.parserVersion });
+      await appendChange(client, targetMailbox, id, 'message.received'); await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+    return id;
+  }
+  async function selfCopyFixture(arrival: 'sent-first' | 'received-first', deferSent = false) {
+    const subject = `Self-copy browser ${arrival} ${randomUUID()}`, wireId = `<${randomUUID()}@provider.example.test>`;
+    let receivedId = '', delivered = Buffer.alloc(0), calls = 0;
+    const copyTransport: MailTransport = { capabilities: transport.capabilities, async send(request) {
+      calls++; delivered = Buffer.concat([Buffer.from(Buffer.from(request.mime).toString('latin1').replace(/^Message-ID:[^\r\n]*\r\n/im,
+        `Message-ID: ${wireId}\r\nReceived: by synthetic-provider.example.test\r\nFeedback-ID: synthetic:dreampost:cf\r\nX-Cf-Spamh-Score: 0\r\nDKIM-Signature: v=1; a=rsa-sha256; d=example.test; s=synthetic; bh=AA==; b=AA==\r\nARC-Authentication-Results: i=1; synthetic-provider.example.test; none\r\n`), 'latin1'), Buffer.from('\r\n')]);
+      if (arrival === 'received-first') receivedId = await receiveSyntheticCopy(delivered);
+      return { providerMessageId: wireId, rfcMessageId: wireId, recipients: request.recipients.map(address => ({ address, status: 'accepted' as const })) };
+    } };
+    const copyService = new OutboundService(pool, outbound, { ...createOutboundDependencies(config, pool, auth, addresses, blobs), transport: copyTransport });
+    let draft = await copyService.createDraft(alice.id, box.id, { mode: 'new', fromAllocationId: fromId, mutationKey: randomUUID() });
+    draft = await copyService.patchDraft(alice.id, box.id, draft.id, { expectedVersion: draft.version, mutationKey: randomUUID(), fromAllocationId: fromId,
+      to: [{ name: 'Alice', address: 'alice@example.test' }], bcc: [{ name: 'Private fixture', address: 'selfcopy-private@example.test' }], subject, bodyText: 'Exact generated self-copy body.' });
+    const submission = await copyService.submit(alice.id, box.id, draft.id, { expectedVersion: draft.version, mutationKey: randomUUID() });
+    for (let attempt = 0; calls === 0 && attempt < 20; attempt++) assert(await runOneOutboundJob(copyService));
+    assert.equal(calls, 1); assert.equal((await pool.query('SELECT state FROM outbound_submissions WHERE id=$1', [submission.id])).rows[0].state, 'accepted');
+    const finishSent = async () => { assert(await ensureSentCopy(copyService)); assert.equal((await pool.query('SELECT sent_copy_state FROM outbound_submissions WHERE id=$1', [submission.id])).rows[0].sent_copy_state, 'done'); };
+    if (!deferSent) await finishSent();
+    if (arrival === 'sent-first') receivedId = await receiveSyntheticCopy(delivered);
+    return { subject, sentId: submission.id, receivedId, bytes: delivered, wireId, finishSent, calls: () => calls };
+  }
   browser = await chromium.launch({ headless: true, ...(process.env['PLAYWRIGHT_CHANNEL'] ? { channel: process.env['PLAYWRIGHT_CHANNEL'] } : {}), args: ['--disable-background-networking'] });
   async function browserContext(user: typeof alice) { const ctx = await browser!.newContext({ viewport: { width: 1440, height: 1000 } }); await ctx.addCookies([{ name: SESSION_COOKIE, value: user.cookie, url: origin, httpOnly: true, sameSite: 'Lax' }]); await ctx.route('**/*', route => { if (new URL(route.request().url()).origin === origin) return route.continue(); unexpected.push(new URL(route.request().url()).origin); return route.abort(); }); return ctx; }
   async function consoleActor(username: string, personal: boolean) {
@@ -716,6 +759,99 @@ try {
     alice.cookie = cookie; alice.csrf = csrf; await context!.addCookies([{ name: SESSION_COOKIE, value: cookie, url: origin, httpOnly: true, sameSite: 'Lax' }]); await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await until(async () => (await page.locator('.sidebar-footer').innerText()).includes('Live updates'), 'fresh session stream');
   });
+  await check('Self-copy arrival orders show one complete conversation from Inbox and Sent', async () => {
+    for (const arrival of ['sent-first', 'received-first'] as const) {
+      const fixture = await selfCopyFixture(arrival);
+      const relation = (await pool.query('SELECT inbound_message_id,sent_message_id FROM mail_verified_copies WHERE inbound_message_id=$1', [fixture.receivedId])).rows[0];
+      assert.equal(relation?.sent_message_id, fixture.sentId);
+      const states = (await pool.query('SELECT message_id,thread_id,folder FROM mail_message_state WHERE message_id=ANY($1::uuid[])', [[fixture.sentId, fixture.receivedId]])).rows;
+      assert.equal(new Set(states.map((state: { thread_id: string }) => state.thread_id)).size, 1);
+      for (const destination of ['Inbox', 'Sent', 'All mail']) {
+        await folder(page, destination); await page.getByLabel('Mail list layout', { exact: true }).selectOption('messages'); await search(page, fixture.subject);
+        assert.equal(await page.locator('.mail-list-row').count(), 1); await page.locator('.mail-list-row .message-item').click();
+        await page.getByLabel('Stored message copy', { exact: true }).waitFor(); assert.equal(await page.locator('.thread-card').count(), 1);
+        assert.equal(await page.getByLabel('Stored message copy', { exact: true }).locator('option').count(), 2);
+        assert.equal(await page.getByLabel('Stored message copy', { exact: true }).inputValue(), fixture.sentId);
+      }
+      for (const copyId of [fixture.sentId, fixture.receivedId]) {
+        await page.getByLabel('Stored message copy', { exact: true }).selectOption(copyId);
+        const ready = page.getByRole('button', { name: 'Download original', exact: true }); await until(async () => !await ready.isDisabled(), 'copy source loaded');
+        const download = page.waitForEvent('download'); await ready.click(); const saved = await download; const path = await saved.path(); assert(path);
+        const bytes = await readFile(path), row = (await pool.query('SELECT sha256,raw_size FROM deliveries WHERE id=$1', [copyId])).rows[0];
+        assert.equal(bytes.length, row.raw_size); assert.equal(createHash('sha256').update(bytes).digest('hex'), row.sha256);
+      }
+      const response = await page.evaluate(async ({ box, subject }) => { const result = await fetch(`/api/mailboxes/${box}/messages?folder=all&view=threads&groupCopies=true&q=${encodeURIComponent(subject)}`); return result.json(); }, { box: box.id, subject: fixture.subject });
+      assert.equal(response.threads.length, 1); assert.equal(response.threads[0].messageCount, 1);
+      selfCopyEvidence.push({ arrival, sentId: fixture.sentId, receivedId: fixture.receivedId, conversationId: states[0].thread_id, logicalCount: 1, immutableCopyCount: 2, providerCalls: fixture.calls() });
+    }
+    await saveScreenshot(page, 'self-copy-conversation.png');
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    await saveScreenshot(page, 'self-copy-mobile.png'); await page.setViewportSize({ width: 1440, height: 1000 });
+  });
+  await check('Self-copy message rows open later replies from both Inbox and Sent', async () => {
+    const fixture = await selfCopyFixture('sent-first');
+    const replyBytes = Buffer.from([`Message-ID: <${randomUUID()}@reply.example.test>`, `References: ${fixture.wireId}`, `In-Reply-To: ${fixture.wireId}`, 'From: Synthetic reply <reply@example.test>', 'To: Alice <alice@example.test>', `Subject: Re: ${fixture.subject}`, 'MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', '', 'A separate reply in the same conversation.', ''].join('\r\n'));
+    const replyId = await receiveSyntheticCopy(replyBytes);
+    for (const destination of ['Inbox', 'Sent']) {
+      await folder(page, destination); await page.getByLabel('Mail list layout', { exact: true }).selectOption('messages'); await search(page, fixture.subject);
+      await page.locator('.mail-list-row').filter({ has: page.getByText(fixture.subject, { exact: true }) }).locator('.message-item').click();
+      await until(async () => await page.locator('.thread-card').count() === 2, 'complete self-copy conversation with later reply');
+      assert.equal(await page.getByLabel('Stored message copy', { exact: true }).count(), 1);
+      assert(await page.locator('.thread-card').filter({ hasText: `Re: ${fixture.subject}` }).count());
+    }
+    const result = await page.evaluate(async ({ box, subject }) => (await fetch(`/api/mailboxes/${box}/messages?folder=all&view=threads&groupCopies=true&q=${encodeURIComponent(subject)}`)).json(), { box: box.id, subject: fixture.subject });
+    assert.equal(result.threads.length, 1); assert.equal(result.threads[0].messageCount, 2);
+    selfCopyEvidence.push({ case: 'full-conversation-from-both-message-lists', sentId: fixture.sentId, receivedId: fixture.receivedId, replyId, logicalCount: 2, rawCount: 3 });
+  });
+  await check('Self-copy personal flags and Inbox filing preserve Sent and shared-reader privacy', async () => {
+    const fixture = await selfCopyFixture('sent-first');
+    await folder(page, 'Inbox'); await page.getByLabel('Mail list layout', { exact: true }).selectOption('messages'); await search(page, fixture.subject); await page.locator('.mail-list-row .message-item').click();
+    await page.getByLabel('Stored message copy', { exact: true }).waitFor();
+    await until(async () => Number((await pool.query("SELECT count(*) FROM deliveries d LEFT JOIN principal_message_flags f ON f.message_id=d.id AND f.principal_id=$1 WHERE d.id=ANY($2::uuid[]) AND COALESCE(f.is_read,d.direction='outbound')", [alice.id, [fixture.sentId, fixture.receivedId]])).rows[0].count) === 2, 'group opening reads the previously unread copy');
+    assert.equal((await pool.query('SELECT count(*) FROM principal_message_flags WHERE principal_id=$1 AND message_id=$2', [alice.id, fixture.sentId])).rows[0].count, '0', 'Automatic reading must not create a needless Sent flag/version');
+    await page.getByRole('button', { name: 'Mark unread', exact: true }).click();
+    await until(async () => Number((await pool.query('SELECT count(*) FROM principal_message_flags WHERE principal_id=$1 AND message_id=ANY($2::uuid[]) AND NOT is_read', [alice.id, [fixture.sentId, fixture.receivedId]])).rows[0].count) === 2, 'explicit group unread');
+    await page.getByRole('button', { name: 'Refresh mail', exact: true }).click(); await until(async () => await page.locator('.thread-pane[aria-busy="false"]').count() === 1, 'group refresh');
+    assert.equal(await page.getByRole('button', { name: 'Mark read', exact: true }).count(), 1);
+    await page.locator('.thread-card').getByRole('button', { name: 'Star message', exact: true }).click();
+    await until(async () => Number((await pool.query('SELECT count(*) FROM principal_message_flags WHERE principal_id=$1 AND message_id=ANY($2::uuid[]) AND is_starred', [alice.id, [fixture.sentId, fixture.receivedId]])).rows[0].count) === 2, 'group stars');
+    await page.locator('.thread-card').getByRole('button', { name: 'Archive received copy', exact: true }).click();
+    await until(async () => (await pool.query('SELECT folder FROM mail_message_state WHERE message_id=$1', [fixture.receivedId])).rows[0].folder === 'archive', 'received copy archived');
+    assert.equal((await pool.query('SELECT folder FROM mail_message_state WHERE message_id=$1', [fixture.sentId])).rows[0].folder, 'archive');
+    await until(async () => await page.locator('.mail-notice').getByText('1 message updated.', { exact: true }).count() === 1 && await page.locator('.mail-notice').getByRole('button', { name: 'Undo', exact: true }).isEnabled(), 'archive receipt');
+    await page.locator('.mail-notice').getByRole('button', { name: 'Undo', exact: true }).click();
+    await until(async () => (await pool.query('SELECT folder FROM mail_message_state WHERE message_id=$1', [fixture.receivedId])).rows[0].folder === 'inbox', 'received archive undone');
+    const peerContext = await browserContext(bob), peer = await peerContext.newPage();
+    try {
+      await peer.goto(origin); await peer.getByLabel('Mailbox', { exact: true }).selectOption(box.id); await search(peer, fixture.subject); await peer.locator('.mail-list-row .message-item').click();
+      await peer.getByLabel('Stored message copy', { exact: true }).waitFor(); assert.equal(await peer.locator('.thread-card').count(), 1);
+      assert.equal(await peer.locator('.thread-card').getByRole('button', { name: /Archive/ }).count(), 0);
+      assert.equal(await peer.locator('.thread-card').getByRole('button', { name: 'Star message', exact: true }).count(), 1);
+      const payloads = await peer.evaluate(async ({ box, sent, received }) => {
+        const values = await Promise.all([`/api/mailboxes/${box}/messages?folder=all`, `/api/mailboxes/${box}/messages/${sent}`, `/api/mailboxes/${box}/messages/${received}`, `/api/mailboxes/${box}/outbox`].map(async path => (await fetch(path)).json()));
+        return JSON.stringify(values);
+      }, { box: box.id, sent: fixture.sentId, received: fixture.receivedId });
+      assert(!payloads.includes('selfcopy-private@example.test')); assert(!(await peer.locator('.thread-pane').innerText()).includes('selfcopy-private@example.test'));
+      await peer.locator('.thread-card').getByRole('button', { name: 'Reply to a person', exact: true }).click(); assert(!(await peer.locator('.reply-people').innerText()).includes('selfcopy-private@example.test'));
+    } finally { await peerContext.close(); }
+    await folder(page, 'Sent'); await search(page, fixture.subject); assert.equal(await page.locator('.mail-list-row').count(), 1);
+    selfCopyEvidence.push({ case: 'flags-filing-shared-privacy', sentId: fixture.sentId, receivedId: fixture.receivedId, bccExcluded: true, sentFilingPreserved: true });
+  });
+  await check('Self-copy late correlation keeps the open conversation and changed-content claims stay separate', async () => {
+    const fixture = await selfCopyFixture('received-first', true);
+    await folder(page, 'Inbox'); await page.getByLabel('Mail list layout', { exact: true }).selectOption('threads'); await search(page, fixture.subject); await page.locator('.message-list .message-item').click();
+    await page.getByRole('button', { name: 'Download original', exact: true }).waitFor(); assert.equal(await page.getByLabel('Stored message copy', { exact: true }).count(), 0);
+    await fixture.finishSent();
+    await page.getByLabel('Stored message copy', { exact: true }).waitFor(); assert.equal(await page.locator('.thread-card').count(), 1);
+    assert.equal(await page.getByLabel('Stored message copy', { exact: true }).inputValue(), fixture.sentId);
+    const altered = Buffer.concat([fixture.bytes, Buffer.from('\r\nUnverified changed body.\r\n')]);
+    const changedId = await receiveSyntheticCopy(altered);
+    assert.equal((await pool.query('SELECT 1 FROM mail_verified_copies WHERE inbound_message_id=$1', [changedId])).rowCount, 0);
+    await folder(page, 'All mail'); await page.getByLabel('Mail list layout', { exact: true }).selectOption('messages'); await search(page, fixture.subject);
+    assert.equal(await page.locator('.mail-list-row').count(), 2);
+    selfCopyEvidence.push({ case: 'late-correlation-and-content-mismatch', sentId: fixture.sentId, receivedId: fixture.receivedId, changedId, changedCopyGrouped: false });
+  });
   await check('Missing everyday feature flag preserves the existing read-only inbox', async () => {
     const legacy = await browserContext(alice); await legacy.route(`${origin}/api/config`, async route => { const response = await route.fetch(); const config = await response.json(); delete config.everydayMail; await route.fulfill({ response, json: config }); });
     const legacyPage = await legacy.newPage(); await legacyPage.goto(origin); await legacyPage.getByText('Up to 100 most recent messages', { exact: true }).waitFor(); assert.equal(await legacyPage.getByRole('button', { name: 'Compose', exact: true }).count(), 0); await legacy.close();
@@ -723,7 +859,7 @@ try {
   await check('Expired source session retains local draft and disables new actions', async () => { await page.getByRole('button', { name: 'Compose', exact: true }).first().click(); await page.getByRole('textbox', { name: 'Message body', exact: true }).fill('Unsaved text must survive authentication expiry'); await pool.query("UPDATE auth_sessions SET expires_at=now()-interval '1 minute',idle_expires_at=now()-interval '1 minute' WHERE principal_id=$1", [alice.id]); await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await until(async () => await page.getByText('Your session or mailbox access is unavailable.', { exact: false }).count() > 0, 'expired composer'); assert.equal(await page.getByRole('textbox', { name: 'Message body', exact: true }).inputValue(), 'Unsaved text must survive authentication expiry'); assert(await page.getByRole('button', { name: 'Send', exact: true }).isDisabled()); });
   assert(checks.length > 0, 'EVERYDAY_QA_ONLY must match at least one check');
   assert.deepEqual(unexpected, []); assert.deepEqual(consoleErrors, []);
-  await writeFile(join(output, 'report.json'), JSON.stringify({ status: 'passed', checks, fixtureSchema: schema, selectedCheckName: only ?? null, readOpeningEvidence, browser: browser.version(), unexpectedRequests: unexpected, pageErrors: consoleErrors, providerCalls: providerCalls.length, scope: 'Synthetic SSO-cookie identities, isolated PostgreSQL, actual API and built browser UI, local file storage and fake provider. No live mail, SSO, R2 or external network.' }, null, 2));
+  await writeFile(join(output, 'report.json'), JSON.stringify({ status: 'passed', checks, fixtureSchema: schema, selectedCheckName: only ?? null, readOpeningEvidence, selfCopyEvidence, browser: browser.version(), unexpectedRequests: unexpected, pageErrors: consoleErrors, providerCalls: providerCalls.length, scope: 'Synthetic SSO-cookie identities, isolated PostgreSQL, actual API and built browser UI, local file storage and fake provider. No live mail, SSO, R2 or external network.' }, null, 2));
 } catch (failure) {
   console.error(failure instanceof Error ? failure.stack : failure);
   await mkdir(output, { recursive: true });

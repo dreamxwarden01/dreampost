@@ -11,7 +11,9 @@ import { getReaderData, parseMimeIsolated, storeReaderData } from './reader-data
 import { attachmentManifestSha256, extractAttachmentsIsolated } from './attachments/extractor.js';
 import { enqueueAttachmentExtraction, getAttachment, listAttachments } from './attachments/service.js';
 import { appendChange } from './database.js';
-import { getOutboundRfcMessageId, indexMessageThread, initializeMessageState, linkOutboundMessageId, normalizeMessageId } from './mail/threading.js';
+import { getOutboundRfcMessageId, indexMessageThread, initializeMessageState, linkOutboundMessageId, normalizeMessageId, reconcileVerifiedCopies, storeMailContentFingerprint } from './mail/threading.js';
+
+import { fingerprintMessageContent, MAIL_CONTENT_FINGERPRINT_VERSION } from './mail/content-fingerprint.js';
 
 interface SourceRow {
   id: string; mailbox_id: string; direction: 'inbound' | 'outbound'; sha256: string; raw_size: number;
@@ -67,10 +69,10 @@ export function createOutboundDependencies(
     if (raw.length !== snapshot.rawSize || createHash('sha256').update(raw).digest('hex') !== snapshot.rawSha256) {
       throw new Error('sent_copy_source_mismatch');
     }
-    return { rawSha256: snapshot.rawSha256, rawSize: snapshot.rawSize, parsed: await parseMimeIsolated(raw) };
+    return { rawSha256: snapshot.rawSha256, rawSize: snapshot.rawSize, parsed: await parseMimeIsolated(raw), contentFingerprint: fingerprintMessageContent(raw) };
   }
   async function persistSent(client: PoolClient, snapshot: SentCopyInput, prepared: PreparedSent): Promise<string> {
-    if (prepared.rawSha256 !== snapshot.rawSha256 || prepared.rawSize !== snapshot.rawSize) throw new Error('sent_copy_preparation_mismatch');
+    if (prepared.rawSha256 !== snapshot.rawSha256 || prepared.rawSize !== snapshot.rawSize || prepared.contentFingerprint === undefined) throw new Error('sent_copy_preparation_mismatch');
     // A canonical submission ID also gives its one Sent copy a stable idempotent identity.
     const id = snapshot.submissionId;
     await client.query('SELECT id FROM mailboxes WHERE id=$1 FOR UPDATE', [snapshot.mailboxId]);
@@ -79,6 +81,10 @@ export function createOutboundDependencies(
     if (existing) {
       if (existing.mailbox_id !== snapshot.mailboxId || existing.sha256 !== snapshot.rawSha256 || existing.raw_size !== snapshot.rawSize
         || existing.direction !== 'outbound' || existing.metadata.kind !== 'outbound' || existing.metadata.submissionId !== id) throw new Error('sent_copy_identity_conflict');
+      await storeMailContentFingerprint(client, { deliveryId: id, mailboxId: snapshot.mailboxId,
+        version: MAIL_CONTENT_FINGERPRINT_VERSION, sha256: prepared.contentFingerprint?.sha256 ?? null,
+        rawSha256: snapshot.rawSha256, rawSize: snapshot.rawSize });
+      await reconcileVerifiedCopies(client, { mailboxId: snapshot.mailboxId, messageId: id });
       await linkOutboundMessageId(client, { mailboxId: snapshot.mailboxId, messageId: id });
       return id;
     }
@@ -88,6 +94,9 @@ export function createOutboundDependencies(
       VALUES($1,$2,$3,$4,$5,$6,'outbound','parsed',$7,$8,$9,$10,$11)`,
       [id,snapshot.mailboxId,metadata,snapshot.rawSha256,snapshot.rawSize,snapshot.date,parsed.subject,parsed.from,parsed.to,parsed.text,parsed.preview]);
     await storeReaderData(client, id, parsed.reader);
+    await storeMailContentFingerprint(client, { deliveryId: id, mailboxId: snapshot.mailboxId,
+      version: MAIL_CONTENT_FINGERPRINT_VERSION, sha256: prepared.contentFingerprint?.sha256 ?? null,
+      rawSha256: snapshot.rawSha256, rawSize: snapshot.rawSize });
     await initializeMessageState(client, { mailboxId: snapshot.mailboxId, messageId: id, direction: 'outbound' });
     await indexMessageThread(client, { mailboxId: snapshot.mailboxId, messageId: id, messageIdHeader: parsed.reader.headers.messageId,
       references: parsed.reader.headers.references, inReplyTo: parsed.reader.headers.inReplyTo, parserVersion: parsed.reader.parserVersion });

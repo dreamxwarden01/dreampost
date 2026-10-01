@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { appendChange } from '../database.js';
+import { equivalentCopyClaims, establishVerifiedCopies, reconcileVerifiedCopies, recordThreadIdentityClaim } from './verified-copies.js';
+export { storeMailContentFingerprint, reconcileVerifiedCopies, backfillVerifiedCopies } from './verified-copies.js';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 /** Conservative common/quoted msg-id normalization; never lowercase identifiers. */
 export function normalizeMessageId(value: unknown): string | null {
@@ -50,6 +52,7 @@ export async function linkOutboundMessageId(client: PoolClient, input: { mailbox
   const wire = await getOutboundRfcMessageId(client,input);
   if (!row || !currentThread || !wire) return { threadId: currentThread, status: 'ignored' };
   const token = normalizeMessageId(wire)!;
+  await recordThreadIdentityClaim(client,input.mailboxId,token,input.messageId);
   type KeyRow = { token: string; thread_id: string; claim_message_id: string | null; ambiguous: boolean };
   const alias = (await client.query<KeyRow>('SELECT token,thread_id,claim_message_id,ambiguous FROM mail_thread_keys WHERE mailbox_id=$1 AND token=$2 FOR UPDATE',
     [input.mailboxId,token])).rows[0];
@@ -153,11 +156,22 @@ export async function indexMessageThread(client: PoolClient, input: ThreadIndexI
   };
   const own=normalizeMessageId(input.messageIdHeader), references=normalize(input.references), inReplyTo=normalize(input.inReplyTo);
   const ancestry=(references.length?references:inReplyTo.slice(0,1)).filter(token=>{if(token===own){warnings.add('self_reference');return false;}return true;});
+  // Publish normalized own-ID evidence before evaluating equivalent copy claims.
+  // The complete fingerprint was stored by the parser/Sent path beforehand.
+  await client.query(`INSERT INTO mail_thread_headers(message_id,mailbox_id,parser_version,message_id_header,reference_ids,in_reply_to,warnings)
+    VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(message_id) DO UPDATE SET parser_version=EXCLUDED.parser_version,
+    message_id_header=EXCLUDED.message_id_header,reference_ids=EXCLUDED.reference_ids,in_reply_to=EXCLUDED.in_reply_to,warnings=EXCLUDED.warnings,indexed_at=now()`,
+    [input.messageId,input.mailboxId,input.parserVersion??1,own,JSON.stringify(references),JSON.stringify(inReplyTo),JSON.stringify([...warnings])]);
+  if(own)await recordThreadIdentityClaim(client,input.mailboxId,own,input.messageId);
+  await establishVerifiedCopies(client,input);
+  current.rows[0].thread_id=(await client.query<{thread_id:string|null}>(
+    'SELECT thread_id FROM mail_message_state WHERE mailbox_id=$1 AND message_id=$2',[input.mailboxId,input.messageId])).rows[0]!.thread_id;
   const tokens=[...new Set([...ancestry,...(own?[own]:[])])];
   const result=await client.query<{token:string;thread_id:string;claim_message_id:string|null;ambiguous:boolean}>(
     'SELECT * FROM mail_thread_keys WHERE mailbox_id=$1 AND token=ANY($2::text[])',[input.mailboxId,tokens]);
   const keys=new Map(result.rows.map(row=>[row.token,row]));const ownKey=own?keys.get(own):undefined;
-  const duplicate=!!ownKey?.claim_message_id&&ownKey.claim_message_id!==input.messageId;
+  const duplicate=!!ownKey?.claim_message_id&&ownKey.claim_message_id!==input.messageId
+    && !await equivalentCopyClaims(client,input.mailboxId,ownKey.claim_message_id,input.messageId);
   if(duplicate){warnings.add('duplicate_message_id');await client.query('UPDATE mail_thread_keys SET ambiguous=true WHERE mailbox_id=$1 AND token=$2',[input.mailboxId,own]);}
   const known=ancestry.map(token=>keys.get(token)).filter(row=>row&&!row.ambiguous);
   if(new Set(known.map(row=>row!.thread_id)).size>1)warnings.add('conflicting_thread_references');
@@ -170,12 +184,12 @@ export async function indexMessageThread(client: PoolClient, input: ThreadIndexI
     ON CONFLICT(mailbox_id,token) DO UPDATE SET claim_message_id=EXCLUDED.claim_message_id
     WHERE mail_thread_keys.claim_message_id IS NULL AND NOT mail_thread_keys.ambiguous`,[input.mailboxId,own,threadId,input.messageId]);
   await client.query('UPDATE mail_message_state SET thread_id=$2 WHERE message_id=$1',[input.messageId,threadId]);
-  await client.query(`INSERT INTO mail_thread_headers(message_id,mailbox_id,parser_version,message_id_header,reference_ids,in_reply_to,warnings)
-    VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(message_id) DO UPDATE SET parser_version=EXCLUDED.parser_version,
-    message_id_header=EXCLUDED.message_id_header,reference_ids=EXCLUDED.reference_ids,in_reply_to=EXCLUDED.in_reply_to,warnings=EXCLUDED.warnings,indexed_at=now()`,
-    [input.messageId,input.mailboxId,input.parserVersion??1,own,JSON.stringify(references),JSON.stringify(inReplyTo),JSON.stringify([...warnings])]);
+  await client.query('UPDATE mail_thread_headers SET warnings=$2::jsonb WHERE message_id=$1',[input.messageId,JSON.stringify([...warnings])]);
+  await reconcileVerifiedCopies(client,input);
   const linked = await linkOutboundMessageId(client, input);
-  return linked.threadId ?? threadId;
+  // Copy reconciliation can move this delivery independently of provider alias linking.
+  const final=(await client.query<{thread_id:string}>('SELECT thread_id FROM mail_message_state WHERE mailbox_id=$1 AND message_id=$2',[input.mailboxId,input.messageId])).rows[0];
+  return final?.thread_id ?? linked.threadId ?? threadId;
 }
 /** Bounded metadata-only backfill. The parser remains responsible for reading original MIME. */
 export async function backfillMailState(pool:Pool,options:{limit?:number}={}):Promise<number>{

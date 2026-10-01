@@ -19,10 +19,10 @@ function query(request:FastifyRequest,allowed:string[]):Record<string,string>{
 function positive(value:string|undefined,defaultValue:number,max:number):number{if(value===undefined)return defaultValue;if(!/^[1-9]\d{0,3}$/.test(value)||Number(value)>max)throw new ApiError(400,'invalid_mail_query');return Number(value);}
 function boolean(value:string|undefined):boolean|undefined{if(value===undefined)return undefined;if(value!=='true'&&value!=='false')throw new ApiError(400,'invalid_mail_query');return value==='true';}
 function listOptions(request:FastifyRequest,thread=false):MailListOptions{
-  const q=query(request,thread?['limit','cursor','folder']:['view','limit','cursor','folder','unread','starred','labelId','q']);
+  const q=query(request,thread?['limit','cursor','folder','groupCopies']:['view','limit','cursor','folder','unread','starred','labelId','q','groupCopies']);
   if(q.view!==undefined&&!['messages','threads'].includes(q.view))throw new ApiError(400,'invalid_mail_query');
   if(q.folder!==undefined&&!['inbox','archive','trash','spam','sent','all'].includes(q.folder))throw new ApiError(400,'invalid_mail_query');
-  return{view:q.view as MailListOptions['view'],limit:positive(q.limit,50,100),cursor:q.cursor,folder:q.folder as MailViewFolder|undefined,unread:boolean(q.unread),starred:boolean(q.starred),labelId:q.labelId,q:q.q};
+  return{groupCopies:boolean(q.groupCopies)??false,view:q.view as MailListOptions['view'],limit:positive(q.limit,50,100),cursor:q.cursor,folder:q.folder as MailViewFolder|undefined,unread:boolean(q.unread),starred:boolean(q.starred),labelId:q.labelId,q:q.q};
 }
 /** Register inside /api. The source session is rechecked with the same business client on writes. */
 export function registerMailRoutes(api:FastifyInstance,service:MailService,options:MailRouteOptions):void{

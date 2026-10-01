@@ -2,10 +2,12 @@ import { parseMimeIsolated, ReaderParseError, READER_PARSER_VERSION, storeReader
 import type { Pool } from 'pg';
 import type { RawBlobStore } from './blob-store.js';
 import { appendChange } from './database.js';
-import { indexMessageThread } from './mail/threading.js';
+import { createHash } from 'node:crypto';
+import { fingerprintMessageContent, MAIL_CONTENT_FINGERPRINT_VERSION } from './mail/content-fingerprint.js';
+import { indexMessageThread, storeMailContentFingerprint } from './mail/threading.js';
 
 interface JobRow { id: string; delivery_id: string; attempts: number; }
-interface MessageRow { mailbox_id: string; sha256: string; }
+interface MessageRow { mailbox_id: string; sha256: string; raw_size: number; }
 
 /** Holds one PostgreSQL job lock during parsing; a process crash returns the job to pending. */
 export async function runOneParseJob(pool: Pool, blobs: RawBlobStore): Promise<boolean> {
@@ -19,14 +21,20 @@ export async function runOneParseJob(pool: Pool, blobs: RawBlobStore): Promise<b
     );
     const job = rows[0];
     if (!job) { await client.query('COMMIT'); return false; }
-    const result = await client.query<MessageRow>('SELECT mailbox_id, sha256 FROM deliveries WHERE id = $1', [job.delivery_id]);
+    const result = await client.query<MessageRow>('SELECT mailbox_id, sha256, raw_size FROM deliveries WHERE id = $1', [job.delivery_id]);
     const message = result.rows[0];
     if (!message) throw new Error('delivery_missing');
     // Persist attempts, including failures, so bounded backfills advance past permanent failures.
     await client.query('UPDATE durable_jobs SET parser_version_attempted = GREATEST(parser_version_attempted,$2) WHERE id = $1', [job.id, READER_PARSER_VERSION]);
     let parsed: ParsedReaderMessage | undefined;
     let failure: string | undefined;
-    try { parsed = await parseMimeIsolated(await blobs.get(message.sha256)); }
+    let contentFingerprint: ReturnType<typeof fingerprintMessageContent> = null;
+    try {
+      const raw = await blobs.get(message.sha256);
+      if (raw.byteLength !== message.raw_size || createHash('sha256').update(raw).digest('hex') !== message.sha256) throw new Error('raw_identity_mismatch');
+      contentFingerprint = fingerprintMessageContent(raw);
+      parsed = await parseMimeIsolated(raw);
+    }
     catch (error) { failure = error instanceof ReaderParseError ? error.code : 'raw_read_or_parse_failed'; }
     if (failure || !parsed) {
       const exhausted = job.attempts + 1 >= 5;
@@ -47,6 +55,9 @@ export async function runOneParseJob(pool: Pool, blobs: RawBlobStore): Promise<b
         [job.delivery_id, parsed.subject, parsed.from, parsed.to, parsed.text, parsed.preview],
       );
       await storeReaderData(client, job.delivery_id, parsed.reader);
+      await storeMailContentFingerprint(client, { deliveryId: job.delivery_id, mailboxId: message.mailbox_id,
+        version: MAIL_CONTENT_FINGERPRINT_VERSION, sha256: contentFingerprint?.sha256 ?? null,
+        rawSha256: message.sha256, rawSize: message.raw_size });
       await indexMessageThread(client, { mailboxId: message.mailbox_id, messageId: job.delivery_id,
         messageIdHeader: parsed.reader.headers.messageId, references: parsed.reader.headers.references,
         inReplyTo: parsed.reader.headers.inReplyTo, parserVersion: parsed.reader.parserVersion });

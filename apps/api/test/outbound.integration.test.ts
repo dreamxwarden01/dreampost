@@ -39,7 +39,7 @@ describe.skipIf(!databaseUrl)('durable drafts and outgoing submission state',()=
    loadSource:async(client,actorId,box,id)=>{const visible=await client.query(`SELECT 1 FROM deliveries d JOIN mailbox_memberships mm ON mm.mailbox_id=d.mailbox_id WHERE d.id=$1 AND d.mailbox_id=$2 AND d.deleted_at IS NULL AND mm.principal_id=$3 AND mm.revoked_at IS NULL AND 'read'=ANY(mm.permissions)`,[id,box,actorId]);const source=sources.get(id);if(!visible.rowCount||!source)throw new ApiError(404,'source_not_found');return structuredClone(source);},
    copyAttachment:async(_actor,_box,messageId,attachmentId)=>{const source=sources.get(messageId)!,item=source.attachments.find(a=>a.id===attachmentId)!,bytes=sourceParts.get(attachmentId)!;return{bytes,...item,sourceContentVersion:source.contentVersion,sourceSha256:source.sourceSha256};},
    withSenderAdmission:(input,work)=>addresses.withSenderAdmission(input,work),
-   prepareSent:async snapshot=>({rawSha256:snapshot.rawSha256,rawSize:snapshot.rawSize,parsed:{} as any}),
+   prepareSent:async snapshot=>({rawSha256:snapshot.rawSha256,rawSize:snapshot.rawSize,parsed:{} as any,contentFingerprint:null}),
    persistSent:async(client,s)=>{if(sentFail)throw new Error('Synthetic Sent index outage');await client.query(`INSERT INTO deliveries(id,mailbox_id,metadata,sha256,raw_size,received_at,direction,parse_status,subject) VALUES($1,$2,$3,$4,$5,$6,'outbound','parsed',$7) ON CONFLICT(id) DO NOTHING`,[s.submissionId,s.mailboxId,{kind:'outbound',submissionId:s.submissionId},s.rawSha256,s.rawSize,s.date,s.subject]);return s.submissionId;}};
   service=new OutboundService(pool,config,deps);
  });
