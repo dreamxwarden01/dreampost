@@ -1,6 +1,6 @@
 # Mailbox operations
 
-This module keeps immutable delivery/MIME identity separate from personal read/star flags, shared filing/labels and derived conversation membership.
+This module keeps immutable delivery/MIME identity separate from personal read/star flags, shared filing/labels and derived conversation membership. See `docs/mail-api.md` for the shared client contract.
 
 `registerMailRoutes` runs inside the application's `/api` scope. Its authentication callback must validate current SSO sessions and Origin/CSRF for mutations. The callback receives the business transaction's PostgreSQL client so principal admission happens before the mailbox lock. Development viewers have a null principal, an exact developmentMailboxId, and read-only access. `manage` is not equivalent to the `manage_messages` grant; shared changes require that grant and the `mail.manage` app permission.
 
